@@ -423,6 +423,28 @@ impl Record {
         utils::copy_memory(qual, &mut data[i..]);
     }
 
+    /// Replace the sequence with a new one of the same length.
+    pub fn set_seq(&mut self, new_seq: &[u8]) {
+        assert_eq!(
+            new_seq.len(),
+            self.seq_len(),
+            "new_seq.len() must equal current seq.len()"
+        );
+
+        let seq_data = self.seq_data();
+        let data =
+            unsafe { slice::from_raw_parts_mut(self.inner.data, self.inner().l_data as usize) };
+        for j in (0..new_seq.len()).step_by(2) {
+            data[seq_data.as_ptr() as usize - self.inner.data as usize + j / 2] =
+                (ENCODE_BASE[new_seq[j] as usize] << 4)
+                    | (if j + 1 < new_seq.len() {
+                        ENCODE_BASE[new_seq[j + 1] as usize]
+                    } else {
+                        0
+                    });
+        }
+    }
+
     /// Replace current qname with a new one.
     pub fn set_qname(&mut self, new_qname: &[u8]) {
         // 251 + 1NUL is the max 32-bit aligned value that fits in u8

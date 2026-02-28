@@ -87,8 +87,10 @@ pub trait FilterId {
 
 impl FilterId for [u8] {
     fn id_from_header(&self, header: &HeaderView) -> Result<Id> {
-        let str = String::from_utf8(self.to_vec()).map_err(|_| Error::BcfInvalidRecord)?;
-        let id = CString8::new(str).map_err(|_| Error::BcfInvalidRecord)?;
+        let id = CString8::new(
+            std::str::from_utf8(self).map_err(|_| Error::BcfInvalidRecord)?,
+        )
+        .map_err(|_| Error::BcfInvalidRecord)?;
         header.name_to_id(&id)
     }
     fn is_pass(&self) -> bool {
@@ -1057,51 +1059,62 @@ impl Record {
         self.push_info_string_impl(tag, &[], htslib::BCF_HT_STR)
     }
 
+    /// Call `bcf_update_info` with a pre-validated pointer and length.
+    ///
+    /// # Safety
+    /// The caller must ensure that `ptr` points to a valid memory region of at least `len`
+    /// elements of the type described by `ht`, and that `ht` is a valid BCF_HT_* constant.
+    fn update_info_unchecked(
+        &mut self,
+        tag: &CStr8,
+        ptr: *const ::std::os::raw::c_void,
+        len: i32,
+        ht: u32,
+    ) -> Result<()> {
+        unsafe {
+            if htslib::bcf_update_info(
+                self.header().inner,
+                self.inner,
+                tag.as_ptr() as *mut c_char,
+                ptr,
+                len,
+                ht as i32,
+            ) == 0
+            {
+                Ok(())
+            } else {
+                Err(Error::BcfSetTag { tag: tag.into() })
+            }
+        }
+    }
+
     /// Add an string-valued INFO tag.
     fn push_info_string_impl(&mut self, tag: &CStr8, data: &[&[u8]], ht: u32) -> Result<()> {
         if data.is_empty() {
             // Clear the tag
-            let c_str = unsafe { CStr8::from_utf8_with_nul_unchecked(b"\0") };
-            let len = 0;
-            unsafe {
-                return if htslib::bcf_update_info(
-                    self.header().inner,
-                    self.inner,
-                    tag.as_ptr() as *mut c_char,
-                    c_str.as_ptr() as *const ::std::os::raw::c_void,
-                    len,
-                    ht as i32,
-                ) == 0
-                {
-                    Ok(())
-                } else {
-                    Err(Error::BcfSetTag { tag: tag.into() })
-                };
-            }
+            // SAFETY: empty_str is a valid NUL-terminated string; len=0 signals deletion.
+            let empty_str = unsafe { CStr8::from_utf8_with_nul_unchecked(b"\0") };
+            return self.update_info_unchecked(
+                tag,
+                empty_str.as_ptr() as *const ::std::os::raw::c_void,
+                0,
+                ht,
+            );
         }
 
         if data == [b""] {
             // This is a flag
-            let c_str = unsafe { CStr8::from_utf8_with_nul_unchecked(b"\0") };
-            let len = 1;
-            unsafe {
-                return if htslib::bcf_update_info(
-                    self.header().inner,
-                    self.inner,
-                    tag.as_ptr() as *mut c_char,
-                    c_str.as_ptr() as *const ::std::os::raw::c_void,
-                    len,
-                    ht as i32,
-                ) == 0
-                {
-                    Ok(())
-                } else {
-                    Err(Error::BcfSetTag { tag: tag.into() })
-                };
-            }
+            // SAFETY: empty_str is a valid NUL-terminated string; len=1 signals flag presence.
+            let empty_str = unsafe { CStr8::from_utf8_with_nul_unchecked(b"\0") };
+            return self.update_info_unchecked(
+                tag,
+                empty_str.as_ptr() as *const ::std::os::raw::c_void,
+                1,
+                ht,
+            );
         }
 
-        let data_bytes = data.iter().map(|x| x.len() + 2).sum(); // estimate for buffer pre-alloc
+        let data_bytes: usize = data.iter().map(|x| x.len()).sum::<usize>() + data.len();
         let mut buf: Vec<u8> = Vec::with_capacity(data_bytes);
         for (i, &s) in data.iter().enumerate() {
             if i > 0 {

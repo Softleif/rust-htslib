@@ -431,17 +431,16 @@ impl Record {
             "new_seq.len() must equal current seq.len()"
         );
 
-        let seq_data = self.seq_data();
+        let seq_offset = self.qname_capacity() + self.cigar_len() * 4;
         let data =
             unsafe { slice::from_raw_parts_mut(self.inner.data, self.inner().l_data as usize) };
         for j in (0..new_seq.len()).step_by(2) {
-            data[seq_data.as_ptr() as usize - self.inner.data as usize + j / 2] =
-                (ENCODE_BASE[new_seq[j] as usize] << 4)
-                    | (if j + 1 < new_seq.len() {
-                        ENCODE_BASE[new_seq[j + 1] as usize]
-                    } else {
-                        0
-                    });
+            data[seq_offset + j / 2] = (ENCODE_BASE[new_seq[j] as usize] << 4)
+                | (if j + 1 < new_seq.len() {
+                    ENCODE_BASE[new_seq[j + 1] as usize]
+                } else {
+                    0
+                });
         }
     }
 
@@ -1914,12 +1913,34 @@ impl ops::Index<usize> for Seq<'_> {
 unsafe impl Send for Seq<'_> {}
 unsafe impl Sync for Seq<'_> {}
 
-/// A borrowed, read-only view of a BAM record. Zero-copy alternative to `Record::from_inner`.
+/// A borrowed, read-only view of a BAM record.
+///
+/// Zero-copy alternative to cloning via `Record::from_inner`. Exposes the most
+/// commonly-needed fields from a pileup alignment without heap allocation.
+///
+/// For fields not available here (chromosome ID, position, insert size, and most
+/// flag predicates), use [`crate::bam::pileup::Alignment::record`] instead, which
+/// returns a full owned [`Record`].
 pub struct RecordView<'a> {
     inner: &'a htslib::bam1_t,
 }
 
+impl<'a> std::fmt::Debug for RecordView<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecordView")
+            .field("qname", &self.qname())
+            .field("seq_len", &self.seq_len())
+            .field("flags", &self.flags())
+            .finish()
+    }
+}
+
 impl<'a> RecordView<'a> {
+    const BAM_FREVERSE: u16 = 16;
+    const BAM_FMREVERSE: u16 = 32;
+    const BAM_FREAD1: u16 = 64;
+    const BAM_FREAD2: u16 = 128;
+
     /// Create a `RecordView` from a raw `bam1_t` pointer.
     ///
     /// # Safety
@@ -1995,20 +2016,24 @@ impl<'a> RecordView<'a> {
         self.inner.core.l_qseq as usize
     }
 
+    /// Returns true if the record is on the reverse strand.
     pub fn is_reverse(&self) -> bool {
-        self.flags() & 0x10 != 0
+        self.flags() & Self::BAM_FREVERSE != 0
     }
 
+    /// Returns true if this is the first segment in the template.
     pub fn is_first_in_template(&self) -> bool {
-        self.flags() & 0x40 != 0
+        self.flags() & Self::BAM_FREAD1 != 0
     }
 
+    /// Returns true if this is the last segment in the template.
     pub fn is_last_in_template(&self) -> bool {
-        self.flags() & 0x80 != 0
+        self.flags() & Self::BAM_FREAD2 != 0
     }
 
+    /// Returns true if the mate is on the reverse strand.
     pub fn is_mate_reverse(&self) -> bool {
-        self.flags() & 0x20 != 0
+        self.flags() & Self::BAM_FMREVERSE != 0
     }
 }
 
@@ -3079,6 +3104,94 @@ mod tests {
         let cigar = "1S20M1D2I3X1=2H";
         let parsed = CigarString::try_from(cigar).unwrap();
         assert_eq!(parsed.to_string(), cigar);
+    }
+
+    // Helper: build a Record with a given sequence (and matching dummy quals).
+    fn make_record_with_seq(seq: &[u8]) -> Record {
+        let mut rec = Record::new();
+        let cigar = CigarString(vec![Cigar::Match(seq.len() as u32)]);
+        let qual: Vec<u8> = vec![30u8; seq.len()];
+        rec.set(b"read1", Some(&cigar), seq, &qual);
+        rec
+    }
+
+    #[test]
+    fn test_set_seq_roundtrip() {
+        let seq = b"ACGTN";
+        let mut rec = make_record_with_seq(seq);
+        // Overwrite with the same content via set_seq to exercise the code path.
+        rec.set_seq(seq);
+        let read_back = rec.seq();
+        assert_eq!(read_back.len(), seq.len());
+        for i in 0..seq.len() {
+            assert_eq!(read_back[i], seq[i], "mismatch at position {}", i);
+        }
+    }
+
+    #[test]
+    fn test_set_seq_odd_length() {
+        let original = b"ACGNN";
+        let replacement = b"TTTNN";
+        let mut rec = make_record_with_seq(original);
+        // Replace last 3 bases using a record that starts as length 3
+        // We need a record of length 3 for the odd-length test.
+        let mut rec3 = make_record_with_seq(b"ACG");
+        rec3.set_seq(b"TGC");
+        let read_back = rec3.seq();
+        assert_eq!(read_back.len(), 3);
+        assert_eq!(read_back[0], b'T');
+        assert_eq!(read_back[1], b'G');
+        assert_eq!(read_back[2], b'C');
+        // The 5-base record replacement still works correctly.
+        rec.set_seq(replacement);
+        let read_back5 = rec.seq();
+        assert_eq!(read_back5.len(), 5);
+        assert_eq!(read_back5[0], b'T');
+        assert_eq!(read_back5[1], b'T');
+        assert_eq!(read_back5[2], b'T');
+    }
+
+    #[test]
+    fn test_set_seq_all_bases() {
+        let seq = b"ACGTN";
+        let mut rec = make_record_with_seq(seq);
+        rec.set_seq(seq);
+        let read_back = rec.seq();
+        assert_eq!(read_back[0], b'A');
+        assert_eq!(read_back[1], b'C');
+        assert_eq!(read_back[2], b'G');
+        assert_eq!(read_back[3], b'T');
+        assert_eq!(read_back[4], b'N');
+    }
+
+    #[test]
+    #[should_panic(expected = "new_seq.len() must equal current seq.len()")]
+    fn test_set_seq_wrong_length_panics() {
+        let mut rec = make_record_with_seq(b"ACGT");
+        // Attempting to set a sequence of different length must panic.
+        rec.set_seq(b"ACGTT");
+    }
+
+    #[test]
+    fn test_record_view_matches_record() {
+        let seq = b"ACGTN";
+        let qual: Vec<u8> = vec![40u8; seq.len()];
+        let cigar = CigarString(vec![Cigar::Match(seq.len() as u32)]);
+        let mut rec = Record::new();
+        rec.set(b"testread", Some(&cigar), seq, &qual);
+        rec.set_mapq(60);
+        rec.set_flags(0x10); // reverse strand
+
+        // SAFETY: rec is alive for the duration of this test; inner_ptr() returns
+        // a pointer to the bam1_t embedded in rec, which remains valid as long as
+        // rec is not moved or dropped.
+        let view = unsafe { RecordView::from_raw(rec.inner_ptr()) };
+
+        assert_eq!(view.qname(), rec.qname());
+        assert_eq!(view.seq_len(), rec.seq_len());
+        assert_eq!(view.mapq(), rec.mapq());
+        assert_eq!(view.flags(), rec.flags());
+        assert_eq!(view.is_reverse(), rec.is_reverse());
     }
 }
 

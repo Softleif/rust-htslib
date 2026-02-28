@@ -1914,6 +1914,104 @@ impl ops::Index<usize> for Seq<'_> {
 unsafe impl Send for Seq<'_> {}
 unsafe impl Sync for Seq<'_> {}
 
+/// A borrowed, read-only view of a BAM record. Zero-copy alternative to `Record::from_inner`.
+pub struct RecordView<'a> {
+    inner: &'a htslib::bam1_t,
+}
+
+impl<'a> RecordView<'a> {
+    /// Create a `RecordView` from a raw `bam1_t` pointer.
+    ///
+    /// # Safety
+    /// The pointer must be valid and the referenced `bam1_t` (including its `data` buffer)
+    /// must live for at least `'a`.
+    pub unsafe fn from_raw(ptr: *const htslib::bam1_t) -> RecordView<'a> {
+        RecordView { inner: &*ptr }
+    }
+
+    fn data(&self) -> &'a [u8] {
+        unsafe { slice::from_raw_parts(self.inner.data, self.inner.l_data as usize) }
+    }
+
+    fn qname_capacity(&self) -> usize {
+        self.inner.core.l_qname as usize
+    }
+
+    fn qname_len(&self) -> usize {
+        self.qname_capacity() - 1 - self.inner.core.l_extranul as usize
+    }
+
+    fn cigar_len(&self) -> usize {
+        self.inner.core.n_cigar as usize
+    }
+
+    fn seq_data(&self) -> &'a [u8] {
+        let offset = self.qname_capacity() + self.cigar_len() * 4;
+        &self.data()[offset..][..self.seq_len().div_ceil(2)]
+    }
+
+    /// Get qname (read name). Complexity: O(1).
+    pub fn qname(&self) -> &'a [u8] {
+        &self.data()[..self.qname_len()]
+    }
+
+    /// Get reference to raw cigar string representation.
+    pub fn raw_cigar(&self) -> &'a [u32] {
+        #[allow(clippy::cast_ptr_alignment)]
+        unsafe {
+            slice::from_raw_parts(
+                self.data()[self.qname_capacity()..].as_ptr() as *const u32,
+                self.cigar_len(),
+            )
+        }
+    }
+
+    /// Get read sequence. Complexity: O(1).
+    pub fn seq(&self) -> Seq<'a> {
+        Seq {
+            encoded: self.seq_data(),
+            len: self.seq_len(),
+        }
+    }
+
+    /// Get base qualities. Complexity: O(1).
+    pub fn qual(&self) -> &'a [u8] {
+        &self.data()[self.qname_capacity() + self.cigar_len() * 4 + self.seq_len().div_ceil(2)..]
+            [..self.seq_len()]
+    }
+
+    /// Get MAPQ.
+    pub fn mapq(&self) -> u8 {
+        self.inner.core.qual
+    }
+
+    /// Get raw flags.
+    pub fn flags(&self) -> u16 {
+        self.inner.core.flag
+    }
+
+    /// Get sequence length.
+    pub fn seq_len(&self) -> usize {
+        self.inner.core.l_qseq as usize
+    }
+
+    pub fn is_reverse(&self) -> bool {
+        self.flags() & 0x10 != 0
+    }
+
+    pub fn is_first_in_template(&self) -> bool {
+        self.flags() & 0x40 != 0
+    }
+
+    pub fn is_last_in_template(&self) -> bool {
+        self.flags() & 0x80 != 0
+    }
+
+    pub fn is_mate_reverse(&self) -> bool {
+        self.flags() & 0x20 != 0
+    }
+}
+
 #[cfg_attr(feature = "serde_feature", derive(Serialize, Deserialize))]
 #[derive(PartialEq, PartialOrd, Eq, Debug, Clone, Copy, Hash)]
 pub enum Cigar {

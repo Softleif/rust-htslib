@@ -114,6 +114,16 @@ impl<'a> Alignment<'a> {
     pub fn record(&self) -> record::Record {
         record::Record::from_inner(self.inner.b)
     }
+
+    /// Zero-copy borrowed view of the underlying BAM record.
+    /// Valid for the lifetime of this pileup position.
+    pub fn record_view(&self) -> record::RecordView<'a> {
+        // SAFETY: self.inner.b points to a bam1_t inside an lbnode_t in htslib's
+        // pileup memory pool. The node is guaranteed alive until the next
+        // bam_plp_auto call. The lifetime 'a is tied to the bam_pileup1_t slice
+        // which has the same validity window.
+        unsafe { record::RecordView::from_raw(self.inner.b) }
+    }
 }
 
 #[derive(PartialEq, Eq, Debug, Copy, Clone, Hash)]

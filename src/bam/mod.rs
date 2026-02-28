@@ -33,6 +33,7 @@ use crate::utils::path_as_bytes;
 pub use crate::bam::buffer::RecordBuffer;
 pub use crate::bam::header::Header;
 pub use crate::bam::record::Record;
+pub use crate::bam::record::RecordView;
 use hts_sys::{hts_fmt_option, sam_fields};
 use std::convert::{TryFrom, TryInto};
 use std::mem::MaybeUninit;

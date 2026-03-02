@@ -2001,6 +2001,22 @@ impl<'a> RecordView<'a> {
             [..self.seq_len()]
     }
 
+    /// Get read sequence and base qualities in a single pass over the record layout.
+    ///
+    /// Equivalent to calling `seq()` and `qual()` separately, but computes the
+    /// internal byte offsets only once. Prefer this when you need both.
+    pub fn seq_and_qual(&self) -> (Seq<'a>, &'a [u8]) {
+        let seq_off = self.qname_capacity() + self.cigar_len() * 4;
+        let seq_len = self.seq_len();
+        let data = self.data();
+        let seq = Seq {
+            encoded: &data[seq_off..][..seq_len.div_ceil(2)],
+            len: seq_len,
+        };
+        let qual = &data[seq_off + seq_len.div_ceil(2)..][..seq_len];
+        (seq, qual)
+    }
+
     /// Get MAPQ.
     pub fn mapq(&self) -> u8 {
         self.inner.core.qual

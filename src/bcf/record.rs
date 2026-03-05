@@ -87,10 +87,8 @@ pub trait FilterId {
 
 impl FilterId for [u8] {
     fn id_from_header(&self, header: &HeaderView) -> Result<Id> {
-        let id = CString8::new(
-            std::str::from_utf8(self).map_err(|_| Error::BcfInvalidRecord)?,
-        )
-        .map_err(|_| Error::BcfInvalidRecord)?;
+        let id = CString8::new(std::str::from_utf8(self).map_err(|_| Error::BcfInvalidRecord)?)
+            .map_err(|_| Error::BcfInvalidRecord)?;
         header.name_to_id(&id)
     }
     fn is_pass(&self) -> bool {

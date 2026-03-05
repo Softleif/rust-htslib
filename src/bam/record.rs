@@ -2051,6 +2051,198 @@ impl<'a> RecordView<'a> {
     pub fn is_mate_reverse(&self) -> bool {
         self.flags() & Self::BAM_FMREVERSE != 0
     }
+
+    /// Look up an auxiliary field by its tag.
+    ///
+    /// Only the first two bytes of a given tag are used for the look-up of a field.
+    /// See [`Aux`] for more details.
+    pub fn aux(&'a self, tag: &[u8]) -> Result<Aux<'a>> {
+        if tag.len() < 2 {
+            return Err(Error::BamAuxStringError);
+        }
+        let aux = unsafe {
+            htslib::bam_aux_get(
+                self.inner as *const htslib::bam1_t,
+                tag.as_ptr() as *const c_char,
+            )
+        };
+        unsafe { Self::read_aux_field(aux).map(|(aux_field, _length)| aux_field) }
+    }
+
+    unsafe fn read_aux_field(aux: *const u8) -> Result<(Aux<'a>, usize)> {
+        const TAG_LEN: isize = 2;
+        // Used for skipping type identifier
+        const TYPE_ID_LEN: isize = 1;
+
+        if aux.is_null() {
+            return Err(Error::BamAuxTagNotFound);
+        }
+
+        let (data, type_size) = match *aux {
+            b'A' => {
+                let type_size = size_of::<u8>();
+                (Aux::Char(*aux.offset(TYPE_ID_LEN)), type_size)
+            }
+            b'c' => {
+                let type_size = size_of::<i8>();
+                (Aux::I8(*aux.offset(TYPE_ID_LEN).cast::<i8>()), type_size)
+            }
+            b'C' => {
+                let type_size = size_of::<u8>();
+                (Aux::U8(*aux.offset(TYPE_ID_LEN)), type_size)
+            }
+            b's' => {
+                let type_size = size_of::<i16>();
+                (
+                    Aux::I16(
+                        slice::from_raw_parts(aux.offset(TYPE_ID_LEN), type_size)
+                            .read_i16::<LittleEndian>()
+                            .map_err(|_| Error::BamAuxParsingError)?,
+                    ),
+                    type_size,
+                )
+            }
+            b'S' => {
+                let type_size = size_of::<u16>();
+                (
+                    Aux::U16(
+                        slice::from_raw_parts(aux.offset(TYPE_ID_LEN), type_size)
+                            .read_u16::<LittleEndian>()
+                            .map_err(|_| Error::BamAuxParsingError)?,
+                    ),
+                    type_size,
+                )
+            }
+            b'i' => {
+                let type_size = size_of::<i32>();
+                (
+                    Aux::I32(
+                        slice::from_raw_parts(aux.offset(TYPE_ID_LEN), type_size)
+                            .read_i32::<LittleEndian>()
+                            .map_err(|_| Error::BamAuxParsingError)?,
+                    ),
+                    type_size,
+                )
+            }
+            b'I' => {
+                let type_size = size_of::<u32>();
+                (
+                    Aux::U32(
+                        slice::from_raw_parts(aux.offset(TYPE_ID_LEN), type_size)
+                            .read_u32::<LittleEndian>()
+                            .map_err(|_| Error::BamAuxParsingError)?,
+                    ),
+                    type_size,
+                )
+            }
+            b'f' => {
+                let type_size = size_of::<f32>();
+                (
+                    Aux::Float(
+                        slice::from_raw_parts(aux.offset(TYPE_ID_LEN), type_size)
+                            .read_f32::<LittleEndian>()
+                            .map_err(|_| Error::BamAuxParsingError)?,
+                    ),
+                    type_size,
+                )
+            }
+            b'd' => {
+                let type_size = size_of::<f64>();
+                (
+                    Aux::Double(
+                        slice::from_raw_parts(aux.offset(TYPE_ID_LEN), type_size)
+                            .read_f64::<LittleEndian>()
+                            .map_err(|_| Error::BamAuxParsingError)?,
+                    ),
+                    type_size,
+                )
+            }
+            b'Z' | b'H' => {
+                let c_str = ffi::CStr::from_ptr(aux.offset(TYPE_ID_LEN).cast::<c_char>());
+                let rust_str = c_str.to_str().map_err(|_| Error::BamAuxParsingError)?;
+                (Aux::String(rust_str), c_str.to_bytes_with_nul().len())
+            }
+            b'B' => {
+                const ARRAY_INNER_TYPE_LEN: isize = 1;
+                const ARRAY_COUNT_LEN: isize = 4;
+
+                // Used for skipping metadata
+                let array_data_offset = TYPE_ID_LEN + ARRAY_INNER_TYPE_LEN + ARRAY_COUNT_LEN;
+
+                let length =
+                    slice::from_raw_parts(aux.offset(TYPE_ID_LEN + ARRAY_INNER_TYPE_LEN), 4)
+                        .read_u32::<LittleEndian>()
+                        .map_err(|_| Error::BamAuxParsingError)? as usize;
+
+                // Return tuples of an `Aux` enum and the length of data + metadata in bytes
+                let (array_data, array_size) = match *aux.offset(TYPE_ID_LEN) {
+                    b'c' => (
+                        Aux::ArrayI8(AuxArray::<'a, i8>::from_bytes(slice::from_raw_parts(
+                            aux.offset(array_data_offset),
+                            length,
+                        ))),
+                        length,
+                    ),
+                    b'C' => (
+                        Aux::ArrayU8(AuxArray::<'a, u8>::from_bytes(slice::from_raw_parts(
+                            aux.offset(array_data_offset),
+                            length,
+                        ))),
+                        length,
+                    ),
+                    b's' => (
+                        Aux::ArrayI16(AuxArray::<'a, i16>::from_bytes(slice::from_raw_parts(
+                            aux.offset(array_data_offset),
+                            length * size_of::<i16>(),
+                        ))),
+                        length * std::mem::size_of::<i16>(),
+                    ),
+                    b'S' => (
+                        Aux::ArrayU16(AuxArray::<'a, u16>::from_bytes(slice::from_raw_parts(
+                            aux.offset(array_data_offset),
+                            length * size_of::<u16>(),
+                        ))),
+                        length * std::mem::size_of::<u16>(),
+                    ),
+                    b'i' => (
+                        Aux::ArrayI32(AuxArray::<'a, i32>::from_bytes(slice::from_raw_parts(
+                            aux.offset(array_data_offset),
+                            length * size_of::<i32>(),
+                        ))),
+                        length * std::mem::size_of::<i32>(),
+                    ),
+                    b'I' => (
+                        Aux::ArrayU32(AuxArray::<'a, u32>::from_bytes(slice::from_raw_parts(
+                            aux.offset(array_data_offset),
+                            length * size_of::<u32>(),
+                        ))),
+                        length * std::mem::size_of::<u32>(),
+                    ),
+                    b'f' => (
+                        Aux::ArrayFloat(AuxArray::<f32>::from_bytes(slice::from_raw_parts(
+                            aux.offset(array_data_offset),
+                            length * size_of::<f32>(),
+                        ))),
+                        length * std::mem::size_of::<f32>(),
+                    ),
+                    _ => {
+                        return Err(Error::BamAuxUnknownType);
+                    }
+                };
+                (
+                    array_data,
+                    // Offset: array-specific metadata + array size
+                    ARRAY_INNER_TYPE_LEN as usize + ARRAY_COUNT_LEN as usize + array_size,
+                )
+            }
+            _ => {
+                return Err(Error::BamAuxUnknownType);
+            }
+        };
+
+        // Offset: metadata + type size
+        Ok((data, TAG_LEN as usize + TYPE_ID_LEN as usize + type_size))
+    }
 }
 
 #[cfg_attr(feature = "serde_feature", derive(Serialize, Deserialize))]

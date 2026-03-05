@@ -2052,6 +2052,16 @@ impl<'a> RecordView<'a> {
         self.flags() & Self::BAM_FMREVERSE != 0
     }
 
+    /// Get the raw auxiliary data as a byte slice.
+    ///
+    /// This returns the unparsed aux segment of the BAM record, suitable for
+    /// fast, custom tag scanning without FFI or full type dispatch overhead.
+    pub fn raw_aux_data(&self) -> &'a [u8] {
+        let seq_len = self.seq_len();
+        let offset = self.qname_capacity() + self.cigar_len() * 4 + seq_len.div_ceil(2) + seq_len;
+        &self.data()[offset..]
+    }
+
     /// Look up an auxiliary field by its tag.
     ///
     /// Only the first two bytes of a given tag are used for the look-up of a field.

@@ -16,6 +16,7 @@ pub mod record;
 pub mod record_serde;
 
 use std::ffi;
+use std::fmt;
 use std::os::raw::c_char;
 use std::path::Path;
 use std::rc::Rc;
@@ -590,13 +591,26 @@ impl<'a, T: AsRef<[u8]>, X: Into<FetchCoordinate>, Y: Into<FetchCoordinate>> Fro
     }
 }
 
-#[derive(Debug)]
 pub struct IndexedReader {
     htsfile: *mut htslib::htsFile,
     header: Arc<HeaderView>,
     idx: Arc<IndexView>,
     itr: Option<*mut htslib::hts_itr_t>,
     tpool: Option<ThreadPool>,
+    pileup_filter: Option<Box<dyn FnMut(&htslib::bam1_t) -> bool + Send>>,
+}
+
+impl fmt::Debug for IndexedReader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IndexedReader")
+            .field("htsfile", &self.htsfile)
+            .field("header", &self.header)
+            .field("idx", &self.idx)
+            .field("itr", &self.itr)
+            .field("tpool", &self.tpool)
+            .field("pileup_filter", &self.pileup_filter.as_ref().map(|_| "..."))
+            .finish()
+    }
 }
 
 unsafe impl Send for IndexedReader {}
@@ -643,6 +657,7 @@ impl IndexedReader {
                 idx: Arc::new(IndexView::new(idx)),
                 itr: None,
                 tpool: None,
+                pileup_filter: None,
             })
         }
     }
@@ -671,6 +686,7 @@ impl IndexedReader {
                 idx: Arc::new(IndexView::new(idx)),
                 itr: None,
                 tpool: None,
+                pileup_filter: None,
             })
         }
     }
@@ -791,15 +807,29 @@ impl IndexedReader {
         record: *mut htslib::bam1_t,
     ) -> i32 {
         let _self = unsafe { (data as *mut Self).as_mut().unwrap() };
-        match _self.itr {
-            Some(itr) => itr_next(_self.htsfile, itr, record), // read fetched region
-            None => unsafe {
-                htslib::sam_read1(
-                    _self.htsfile,
-                    _self.header().inner_ptr() as *mut hts_sys::sam_hdr_t,
-                    record,
-                )
-            }, // ordinary reading
+        loop {
+            let ret = match _self.itr {
+                Some(itr) => itr_next(_self.htsfile, itr, record), // read fetched region
+                None => unsafe {
+                    htslib::sam_read1(
+                        _self.htsfile,
+                        _self.header().inner_ptr() as *mut hts_sys::sam_hdr_t,
+                        record,
+                    )
+                }, // ordinary reading
+            };
+            if ret < 0 {
+                return ret; // EOF or error
+            }
+            match &mut _self.pileup_filter {
+                None => return ret,
+                Some(f) => {
+                    if f(unsafe { &*record }) {
+                        return ret; // record passes filter
+                    }
+                    // record filtered out, read next
+                }
+            }
         }
     }
 
@@ -810,6 +840,29 @@ impl IndexedReader {
     /// * `path` - path to the FASTA reference
     pub fn set_reference<P: AsRef<Path>>(&mut self, path: P) -> Result<()> {
         unsafe { set_fai_filename(self.htsfile, path) }
+    }
+
+    /// Set a filter that is applied during pileup iteration.
+    ///
+    /// Records that do not pass the filter are skipped before they enter the
+    /// pileup engine, so they never consume pileup memory and are never
+    /// visited in per-column alignment lists.
+    ///
+    /// The filter receives a [`record::RecordView`] for each record read from
+    /// the BAM file and must return `true` to keep the record.
+    pub fn set_pileup_filter<F>(&mut self, mut filter: F)
+    where
+        F: FnMut(record::RecordView<'_>) -> bool + Send + 'static,
+    {
+        self.pileup_filter = Some(Box::new(move |b: &htslib::bam1_t| {
+            let view = unsafe { record::RecordView::from_raw(b as *const htslib::bam1_t) };
+            filter(view)
+        }));
+    }
+
+    /// Remove a previously set pileup filter.
+    pub fn clear_pileup_filter(&mut self) {
+        self.pileup_filter = None;
     }
 
     pub fn index(&self) -> &IndexView {

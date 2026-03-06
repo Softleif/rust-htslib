@@ -310,11 +310,14 @@ impl Reader {
         data: *mut ::std::os::raw::c_void,
         record: *mut htslib::bam1_t,
     ) -> i32 {
-        let mut _self = unsafe { (data as *mut Self).as_mut().unwrap() };
+        // SAFETY: `data` is set from `self as *const Self` in `pileup()`, which
+        // holds a `&mut Self` borrow for the lifetime of the `Pileups` iterator.
+        // The pointer is therefore non-null and exclusively owned for this call.
+        let this = unsafe { &mut *(data as *mut Self) };
         unsafe {
             htslib::sam_read1(
-                _self.htsfile(),
-                _self.header().inner_ptr() as *mut hts_sys::sam_hdr_t,
+                this.htsfile(),
+                this.header().inner_ptr() as *mut hts_sys::sam_hdr_t,
                 record,
             )
         }
@@ -806,14 +809,17 @@ impl IndexedReader {
         data: *mut ::std::os::raw::c_void,
         record: *mut htslib::bam1_t,
     ) -> i32 {
-        let _self = unsafe { (data as *mut Self).as_mut().unwrap() };
+        // SAFETY: `data` is set from `self as *const Self` in `pileup()`, which
+        // holds a `&mut Self` borrow for the lifetime of the `Pileups` iterator.
+        // The pointer is therefore non-null and exclusively owned for this call.
+        let this = unsafe { &mut *(data as *mut Self) };
         loop {
-            let ret = match _self.itr {
-                Some(itr) => itr_next(_self.htsfile, itr, record), // read fetched region
+            let ret = match this.itr {
+                Some(itr) => itr_next(this.htsfile, itr, record), // read fetched region
                 None => unsafe {
                     htslib::sam_read1(
-                        _self.htsfile,
-                        _self.header().inner_ptr() as *mut hts_sys::sam_hdr_t,
+                        this.htsfile,
+                        this.header().inner_ptr() as *mut hts_sys::sam_hdr_t,
                         record,
                     )
                 }, // ordinary reading
@@ -821,7 +827,7 @@ impl IndexedReader {
             if ret < 0 {
                 return ret; // EOF or error
             }
-            match &mut _self.pileup_filter {
+            match &mut this.pileup_filter {
                 None => return ret,
                 Some(f) => {
                     if f(unsafe { &*record }) {

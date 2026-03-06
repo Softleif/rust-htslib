@@ -594,13 +594,15 @@ impl<'a, T: AsRef<[u8]>, X: Into<FetchCoordinate>, Y: Into<FetchCoordinate>> Fro
     }
 }
 
+pub type PileupFilter = Box<dyn FnMut(&hts_sys::bam1_t) -> bool + Send + 'static>;
+
 pub struct IndexedReader {
     htsfile: *mut htslib::htsFile,
     header: Arc<HeaderView>,
     idx: Arc<IndexView>,
     itr: Option<*mut htslib::hts_itr_t>,
     tpool: Option<ThreadPool>,
-    pileup_filter: Option<Box<dyn FnMut(&htslib::bam1_t) -> bool + Send>>,
+    pileup_filter: Option<PileupFilter>,
 }
 
 impl fmt::Debug for IndexedReader {

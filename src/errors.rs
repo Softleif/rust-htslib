@@ -45,6 +45,10 @@ pub enum Error {
     TabixTruncatedRecord,
     #[error("invalid tabix index")]
     TabixInvalidIndex,
+    #[error("failed to build tabix index")]
+    TabixBuildIndex,
+    #[error("file is not BGZF-compressed")]
+    TabixNotBgzf,
 
     // Errors for BAM
     #[error("error parsing CIGAR string: {msg}")]

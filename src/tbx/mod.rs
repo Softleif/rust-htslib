@@ -50,6 +50,59 @@ use crate::errors::{Error, Result};
 use crate::htslib;
 use crate::utils::path_as_bytes;
 
+/// Preset configurations for common file formats.
+#[derive(Debug, Clone, Copy)]
+pub enum TabixFormat {
+    Bed,
+    Gff,
+    Sam,
+    Vcf,
+}
+
+impl TabixFormat {
+    fn conf_ptr(self) -> *const htslib::tbx_conf_t {
+        unsafe {
+            match self {
+                TabixFormat::Bed => &htslib::tbx_conf_bed,
+                TabixFormat::Gff => &htslib::tbx_conf_gff,
+                TabixFormat::Sam => &htslib::tbx_conf_sam,
+                TabixFormat::Vcf => &htslib::tbx_conf_vcf,
+            }
+        }
+    }
+}
+
+/// Build a tabix index for a BGZF-compressed file.
+///
+/// This reads the file at `path`, builds a `.tbi` index, and writes it
+/// alongside the original file (e.g. `file.bed.gz.tbi`).
+///
+/// # Arguments
+///
+/// * `path` - path to the BGZF-compressed file
+/// * `format` - the file format preset (determines which columns are chrom/start/end)
+/// * `n_threads` - number of threads for decompression (0 for single-threaded)
+pub fn build_index<P: AsRef<Path>>(path: P, format: TabixFormat, n_threads: u32) -> Result<()> {
+    let path_bytes = path_as_bytes(path, true)?;
+    let c_path = ffi::CString::new(path_bytes).map_err(|_| Error::NonUnicodePath)?;
+
+    let ret = unsafe {
+        htslib::tbx_index_build3(
+            c_path.as_ptr(),
+            ptr::null(),
+            0,
+            n_threads as i32,
+            format.conf_ptr(),
+        )
+    };
+
+    match ret {
+        0 => Ok(()),
+        -2 => Err(Error::TabixNotBgzf),
+        _ => Err(Error::TabixBuildIndex),
+    }
+}
+
 /// A trait for a Tabix reader with a read method.
 pub trait Read: Sized {
     /// Read next line into the given `Vec<u8>` (i.e., ASCII string).

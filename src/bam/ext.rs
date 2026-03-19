@@ -6,7 +6,7 @@
 //! Extensions for BAM records beyond htslib
 
 use crate::bam;
-use crate::bam::record::Cigar;
+use crate::bam::record::{Cigar, CigarString};
 use crate::htslib;
 use std::collections::HashMap;
 
@@ -14,7 +14,7 @@ pub struct IterAlignedBlockPairs {
     genome_pos: i64,
     read_pos: i64,
     cigar_index: usize,
-    cigar: Vec<Cigar>,
+    cigar: CigarString,
 }
 
 impl Iterator for IterAlignedBlockPairs {
@@ -51,7 +51,7 @@ impl Iterator for IterAlignedBlockPairs {
 pub struct IterAlignedBlocks {
     pos: i64,
     cigar_index: usize,
-    cigar: Vec<Cigar>,
+    cigar: CigarString,
 }
 
 impl Iterator for IterAlignedBlocks {
@@ -80,7 +80,7 @@ impl Iterator for IterAlignedBlocks {
 pub struct IterIntrons {
     pos: i64,
     cigar_index: usize,
-    cigar: Vec<Cigar>,
+    cigar: CigarString,
 }
 
 impl Iterator for IterIntrons {
@@ -109,7 +109,7 @@ impl Iterator for IterIntrons {
 pub struct IterAlignedPairs {
     genome_pos: i64,
     read_pos: i64,
-    cigar: Vec<Cigar>,
+    cigar: CigarString,
     remaining_match_bp: u32,
     cigar_index: usize,
 }
@@ -152,7 +152,7 @@ impl Iterator for IterAlignedPairs {
 pub struct IterAlignedPairsFull {
     genome_pos: i64,
     read_pos: i64,
-    cigar: Vec<Cigar>,
+    cigar: CigarString,
     remaining_match_bp: u32,
     remaining_ins_bp: u32,
     remaining_del_bp: u32,
@@ -317,7 +317,7 @@ impl BamRecordExtensions for bam::Record {
     fn aligned_blocks(&self) -> IterAlignedBlocks {
         IterAlignedBlocks {
             pos: self.pos(),
-            cigar: self.cigar().take().0,
+            cigar: self.cigar().take(),
             cigar_index: 0,
         }
     }
@@ -325,7 +325,7 @@ impl BamRecordExtensions for bam::Record {
     fn introns(&self) -> IterIntrons {
         IterIntrons {
             pos: self.pos(),
-            cigar: self.cigar().take().0,
+            cigar: self.cigar().take(),
             cigar_index: 0,
         }
     }
@@ -334,7 +334,7 @@ impl BamRecordExtensions for bam::Record {
         IterAlignedBlockPairs {
             genome_pos: self.pos(),
             read_pos: 0,
-            cigar: self.cigar().take().0,
+            cigar: self.cigar().take(),
             cigar_index: 0,
         }
     }
@@ -343,7 +343,7 @@ impl BamRecordExtensions for bam::Record {
         IterAlignedPairs {
             genome_pos: self.pos(),
             read_pos: 0,
-            cigar: self.cigar().take().0,
+            cigar: self.cigar().take(),
             remaining_match_bp: 0,
             cigar_index: 0,
         }
@@ -353,7 +353,7 @@ impl BamRecordExtensions for bam::Record {
         IterAlignedPairsFull {
             genome_pos: self.pos(),
             read_pos: 0,
-            cigar: self.cigar().take().0,
+            cigar: self.cigar().take(),
             remaining_match_bp: 0,
             remaining_ins_bp: 0,
             remaining_del_bp: 0,

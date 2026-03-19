@@ -592,7 +592,9 @@ impl Record {
         }
     }
 
-    /// Return unpacked cigar string. This will create a fresh copy the Cigar data.
+    /// Return unpacked cigar string. If the cigar has been cached via
+    /// [`cache_cigar`](Self::cache_cigar), this is a cheap clone (Arc refcount bump).
+    /// Otherwise, the cigar is decoded from the raw BAM data.
     pub fn cigar(&self) -> CigarStringView {
         match self.cigar {
             Some(ref c) => c.clone(),
@@ -2179,39 +2181,78 @@ impl fmt::Display for Cigar {
 unsafe impl Send for Cigar {}
 unsafe impl Sync for Cigar {}
 
-custom_derive! {
-    /// A CIGAR string. This type wraps around a `Vec<Cigar>`.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use rust_htslib::bam::record::{Cigar, CigarString};
-    ///
-    /// let cigar = CigarString(vec![Cigar::Match(100), Cigar::SoftClip(10)]);
-    ///
-    /// // access by index
-    /// assert_eq!(cigar[0], Cigar::Match(100));
-    /// // format into classical string representation
-    /// assert_eq!(format!("{}", cigar), "100M10S");
-    /// // iterate
-    /// for op in &cigar {
-    ///    println!("{}", op);
-    /// }
-    /// ```
-    #[cfg_attr(feature = "serde_feature", derive(Serialize, Deserialize))]
-    #[derive(NewtypeDeref,
-            NewtypeDerefMut,
-             NewtypeIndex(usize),
-             NewtypeIndexMut(usize),
-             NewtypeFrom,
-             PartialEq,
-             PartialOrd,
-             Eq,
-             NewtypeDebug,
-             Clone,
-             Hash
-    )]
-    pub struct CigarString(pub Vec<Cigar>);
+/// A CIGAR string
+///
+/// Backed by an `Arc<[Cigar]>` for cheap cloning.
+///
+/// # Example
+///
+/// ```
+/// use rust_htslib::bam::record::{Cigar, CigarString};
+///
+/// let cigar = CigarString::from(vec![Cigar::Match(100), Cigar::SoftClip(10)]);
+///
+/// // access by index
+/// assert_eq!(cigar[0], Cigar::Match(100));
+/// // format into classical string representation
+/// assert_eq!(format!("{}", cigar), "100M10S");
+/// // iterate
+/// for op in &cigar {
+///    println!("{}", op);
+/// }
+/// // cheap clone (just a reference count bump)
+/// let cigar2 = cigar.clone();
+/// ```
+#[derive(PartialEq, PartialOrd, Eq, Clone, Hash, Debug)]
+pub struct CigarString(pub Arc<[Cigar]>);
+
+#[cfg(feature = "serde_feature")]
+impl Serialize for CigarString {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.as_ref().serialize(serializer)
+    }
+}
+
+#[cfg(feature = "serde_feature")]
+impl<'de> Deserialize<'de> for CigarString {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let v = Vec::<Cigar>::deserialize(deserializer)?;
+        Ok(CigarString::from(v))
+    }
+}
+
+impl ops::Deref for CigarString {
+    type Target = [Cigar];
+
+    fn deref(&self) -> &[Cigar] {
+        &self.0
+    }
+}
+
+impl ops::Index<usize> for CigarString {
+    type Output = Cigar;
+
+    fn index(&self, index: usize) -> &Cigar {
+        &self.0[index]
+    }
+}
+
+impl From<Vec<Cigar>> for CigarString {
+    fn from(v: Vec<Cigar>) -> Self {
+        CigarString(v.into())
+    }
+}
+
+impl<const N: usize> From<[Cigar; N]> for CigarString {
+    fn from(a: [Cigar; N]) -> Self {
+        CigarString(Arc::from(a))
+    }
+}
+
+impl std::iter::FromIterator<Cigar> for CigarString {
+    fn from_iter<I: IntoIterator<Item = Cigar>>(iter: I) -> Self {
+        CigarString(iter.into_iter().collect())
+    }
 }
 
 impl CigarString {
@@ -2235,7 +2276,7 @@ impl CigarString {
 
         let mut cigar = Vec::new();
         if alignment.operations.is_empty() {
-            return CigarString(cigar);
+            return CigarString::from(cigar);
         }
 
         let add_op = |op: AlignmentOperation, length: u32, cigar: &mut Vec<Cigar>| match op {
@@ -2274,7 +2315,7 @@ impl CigarString {
             });
         }
 
-        CigarString(cigar)
+        CigarString::from(cigar)
     }
 }
 
@@ -2292,7 +2333,7 @@ impl TryFrom<&[u8]> for CigarString {
     /// let cigar_str = "2H10M5X3=2H".as_bytes();
     /// let cigar = CigarString::try_from(cigar_str)
     ///     .expect("Unable to parse cigar string.");
-    /// let expected_cigar = CigarString(vec![
+    /// let expected_cigar = CigarString::from(vec![
     ///     HardClip(2),
     ///     Match(10),
     ///     Diff(5),
@@ -2364,7 +2405,7 @@ impl TryFrom<&[u8]> for CigarString {
             });
             i = j + 1;
         }
-        Ok(CigarString(inner))
+        Ok(CigarString::from(inner))
     }
 }
 
@@ -2382,7 +2423,7 @@ impl TryFrom<&str> for CigarString {
     /// let cigar_str = "2H10M5X3=2H";
     /// let cigar = CigarString::try_from(cigar_str)
     ///     .expect("Unable to parse cigar string.");
-    /// let expected_cigar = CigarString(vec![
+    /// let expected_cigar = CigarString::from(vec![
     ///     HardClip(2),
     ///     Match(10),
     ///     Diff(5),
@@ -2393,7 +2434,7 @@ impl TryFrom<&str> for CigarString {
     /// ```
     fn try_from(text: &str) -> Result<Self> {
         let bytes = text.as_bytes();
-        if text.chars().count() != bytes.len() {
+        if !text.is_ascii() {
             return Err(Error::BamParseCigar {
                 msg: "CIGAR string contained non-ASCII characters, which are not valid. Valid are [0-9MIDNSHP=X].".to_owned(),
             });
@@ -2402,15 +2443,9 @@ impl TryFrom<&str> for CigarString {
     }
 }
 
-impl<'a> CigarString {
-    pub fn iter(&'a self) -> ::std::slice::Iter<'a, Cigar> {
-        self.into_iter()
-    }
-}
-
 impl<'a> IntoIterator for &'a CigarString {
     type Item = &'a Cigar;
-    type IntoIter = ::std::slice::Iter<'a, Cigar>;
+    type IntoIter = std::slice::Iter<'a, Cigar>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.0.iter()
@@ -2419,7 +2454,7 @@ impl<'a> IntoIterator for &'a CigarString {
 
 impl fmt::Display for CigarString {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        for op in self {
+        for op in self.iter() {
             fmt.write_fmt(format_args!("{}{}", op.len(), op.char()))?;
         }
         Ok(())
@@ -2646,28 +2681,16 @@ impl ops::Index<usize> for CigarStringView {
     type Output = Cigar;
 
     fn index(&self, index: usize) -> &Cigar {
-        self.inner.index(index)
-    }
-}
-
-impl ops::IndexMut<usize> for CigarStringView {
-    fn index_mut(&mut self, index: usize) -> &mut Cigar {
-        self.inner.index_mut(index)
-    }
-}
-
-impl<'a> CigarStringView {
-    pub fn iter(&'a self) -> ::std::slice::Iter<'a, Cigar> {
-        self.inner.into_iter()
+        &self.inner[index]
     }
 }
 
 impl<'a> IntoIterator for &'a CigarStringView {
     type Item = &'a Cigar;
-    type IntoIter = ::std::slice::Iter<'a, Cigar>;
+    type IntoIter = std::slice::Iter<'a, Cigar>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.inner.into_iter()
+        self.inner.iter()
     }
 }
 
@@ -2919,7 +2942,7 @@ mod tests {
 
     #[test]
     fn test_cigar_string() {
-        let cigar = CigarString(vec![Cigar::Match(100), Cigar::SoftClip(10)]);
+        let cigar = CigarString::from(vec![Cigar::Match(100), Cigar::SoftClip(10)]);
 
         assert_eq!(cigar[0], Cigar::Match(100));
         assert_eq!(format!("{}", cigar), "100M10S");
@@ -2930,15 +2953,15 @@ mod tests {
 
     #[test]
     fn test_cigar_string_view_pos() {
-        let cigar = CigarString(vec![Cigar::Match(100), Cigar::SoftClip(10)]).into_view(5);
+        let cigar = CigarString::from(vec![Cigar::Match(100), Cigar::SoftClip(10)]).into_view(5);
         assert_eq!(cigar.pos(), 5);
     }
 
     #[test]
     fn test_cigar_string_leading_softclips() {
-        let cigar = CigarString(vec![Cigar::SoftClip(10), Cigar::Match(100)]).into_view(0);
+        let cigar = CigarString::from(vec![Cigar::SoftClip(10), Cigar::Match(100)]).into_view(0);
         assert_eq!(cigar.leading_softclips(), 10);
-        let cigar2 = CigarString(vec![
+        let cigar2 = CigarString::from(vec![
             Cigar::HardClip(5),
             Cigar::SoftClip(10),
             Cigar::Match(100),
@@ -2949,9 +2972,9 @@ mod tests {
 
     #[test]
     fn test_cigar_string_trailing_softclips() {
-        let cigar = CigarString(vec![Cigar::Match(100), Cigar::SoftClip(10)]).into_view(0);
+        let cigar = CigarString::from(vec![Cigar::Match(100), Cigar::SoftClip(10)]).into_view(0);
         assert_eq!(cigar.trailing_softclips(), 10);
-        let cigar2 = CigarString(vec![
+        let cigar2 = CigarString::from(vec![
             Cigar::Match(100),
             Cigar::SoftClip(10),
             Cigar::HardClip(5),
@@ -2969,7 +2992,7 @@ mod tests {
         // var:                       V
         // c01: 7H                 M  M
         // qpos:                  00 01
-        let c01 = CigarString(vec![Cigar::HardClip(7), Cigar::Match(2)]).into_view(4);
+        let c01 = CigarString::from(vec![Cigar::HardClip(7), Cigar::Match(2)]).into_view(4);
         assert_eq!(c01.read_pos(vpos, false, false).unwrap(), Some(1));
 
         // Skip leading SoftClip or use as pre-POS matches
@@ -2979,7 +3002,7 @@ mod tests {
         // qpos:  00        02 03 04 05 06 07
         // c02: 5H     S  S  M  M  M  M  M  M
         // qpos:      00 01 02 03 04 05 06 07
-        let c02 = CigarString(vec![Cigar::SoftClip(2), Cigar::Match(6)]).into_view(2);
+        let c02 = CigarString::from(vec![Cigar::SoftClip(2), Cigar::Match(6)]).into_view(2);
         assert_eq!(c02.read_pos(vpos, false, false).unwrap(), Some(5));
         assert_eq!(c02.read_pos(vpos, true, false).unwrap(), Some(5));
 
@@ -2991,7 +3014,7 @@ mod tests {
         // qpos: 00                     03 04
         // c03:                 S  S  S  M  M
         // qpos:               00 01 02 03 04
-        let c03 = CigarString(vec![Cigar::SoftClip(3), Cigar::Match(6)]).into_view(6);
+        let c03 = CigarString::from(vec![Cigar::SoftClip(3), Cigar::Match(6)]).into_view(6);
         assert_eq!(c03.read_pos(vpos, false, false).unwrap(), None);
         assert_eq!(c03.read_pos(vpos, true, false).unwrap(), Some(2));
 
@@ -3000,7 +3023,7 @@ mod tests {
         // var:                       V
         // c04:  3I                X  X  X
         // qpos: 00               03 04 05
-        let c04 = CigarString(vec![Cigar::Ins(3), Cigar::Diff(3)]).into_view(4);
+        let c04 = CigarString::from(vec![Cigar::Ins(3), Cigar::Diff(3)]).into_view(4);
         assert_eq!(c04.read_pos(vpos, true, false).unwrap(), Some(4));
 
         // Matches and deletion before variant position
@@ -3008,7 +3031,7 @@ mod tests {
         // var:                       V
         // c05:        =  =  D  D  X  =  =
         // qpos:      00 01       02 03 04 05
-        let c05 = CigarString(vec![
+        let c05 = CigarString::from(vec![
             Cigar::Equal(2),
             Cigar::Del(2),
             Cigar::Diff(1),
@@ -3022,7 +3045,8 @@ mod tests {
         // var:                       V
         // c06:                 =  =  D  X  X
         // qpos:               00 01    02 03
-        let c06 = CigarString(vec![Cigar::Equal(2), Cigar::Del(1), Cigar::Diff(2)]).into_view(3);
+        let c06 =
+            CigarString::from(vec![Cigar::Equal(2), Cigar::Del(1), Cigar::Diff(2)]).into_view(3);
         assert_eq!(c06.read_pos(vpos, false, true).unwrap(), Some(2));
         assert_eq!(c06.read_pos(vpos, false, false).unwrap(), None);
 
@@ -3031,7 +3055,8 @@ mod tests {
         // var:                       V
         // c07:              =  =  D  D  D  M  M
         // qpos:            00 01          02 03
-        let c07 = CigarString(vec![Cigar::Equal(2), Cigar::Del(3), Cigar::Match(2)]).into_view(2);
+        let c07 =
+            CigarString::from(vec![Cigar::Equal(2), Cigar::Del(3), Cigar::Match(2)]).into_view(2);
         assert_eq!(c07.read_pos(vpos, false, true).unwrap(), Some(2));
         assert_eq!(c07.read_pos(vpos, false, false).unwrap(), None);
 
@@ -3040,7 +3065,7 @@ mod tests {
         // var:                       V
         // c08:              =  X  N  N  N  M  M
         // qpos:            00 01          02 03
-        let c08 = CigarString(vec![
+        let c08 = CigarString::from(vec![
             Cigar::Equal(1),
             Cigar::Diff(1),
             Cigar::RefSkip(3),
@@ -3055,7 +3080,7 @@ mod tests {
         // var:                          V
         // c09: 3H           =  = 3H  =  =
         // qpos:            00 01    02 03
-        let c09 = CigarString(vec![
+        let c09 = CigarString::from(vec![
             Cigar::HardClip(3),
             Cigar::Equal(2),
             Cigar::HardClip(3),
@@ -3069,7 +3094,8 @@ mod tests {
         // var:                       V
         // c10:           M  M  D  D  M  M
         // qpos:         00 01       02 03
-        let c10 = CigarString(vec![Cigar::Match(2), Cigar::Del(2), Cigar::Match(2)]).into_view(1);
+        let c10 =
+            CigarString::from(vec![Cigar::Match(2), Cigar::Del(2), Cigar::Match(2)]).into_view(1);
         assert_eq!(c10.read_pos(vpos, false, false).unwrap(), Some(2));
 
         // Insertion right before variant position
@@ -3077,7 +3103,8 @@ mod tests {
         // var:                          V
         // c11:                 M  M 3I  M
         // qpos:               00 01 02 05 06
-        let c11 = CigarString(vec![Cigar::Match(2), Cigar::Ins(3), Cigar::Match(2)]).into_view(3);
+        let c11 =
+            CigarString::from(vec![Cigar::Match(2), Cigar::Ins(3), Cigar::Match(2)]).into_view(3);
         assert_eq!(c11.read_pos(vpos, false, false).unwrap(), Some(5));
 
         // Insertion right after variant position
@@ -3085,7 +3112,8 @@ mod tests {
         // var:                       V
         // c12:                 M  M  M 2I  =
         // qpos:               00 01 02 03 05
-        let c12 = CigarString(vec![Cigar::Match(3), Cigar::Ins(2), Cigar::Equal(1)]).into_view(3);
+        let c12 =
+            CigarString::from(vec![Cigar::Match(3), Cigar::Ins(2), Cigar::Equal(1)]).into_view(3);
         assert_eq!(c12.read_pos(vpos, false, false).unwrap(), Some(2));
 
         // Deletion right after variant position
@@ -3093,7 +3121,8 @@ mod tests {
         // var:                       V
         // c13:                 M  M  M  D  =
         // qpos:               00 01 02    03
-        let c13 = CigarString(vec![Cigar::Match(3), Cigar::Del(1), Cigar::Equal(1)]).into_view(3);
+        let c13 =
+            CigarString::from(vec![Cigar::Match(3), Cigar::Del(1), Cigar::Equal(1)]).into_view(3);
         assert_eq!(c13.read_pos(vpos, false, false).unwrap(), Some(2));
 
         // A messy and complicated example, including a Pad operation
@@ -3102,7 +3131,7 @@ mod tests {
         // var:                                                           V
         // c14: 5H3S   = 2P  M  X 3I  M  M  D 2I  =  =  N  N  N  M  M  M  =  =  5S2H
         // qpos:  00  03    04 05 06 09 10    11 13 14          15 16 17 18 19
-        let c14 = CigarString(vec![
+        let c14 = CigarString::from(vec![
             Cigar::HardClip(5),
             Cigar::SoftClip(3),
             Cigar::Equal(1),
@@ -3128,14 +3157,14 @@ mod tests {
         // var:                       V
         // c15: 5P1H            =  =  =
         // qpos:               00 01 02
-        let c15 =
-            CigarString(vec![Cigar::Pad(5), Cigar::HardClip(1), Cigar::Equal(3)]).into_view(3);
+        let c15 = CigarString::from(vec![Cigar::Pad(5), Cigar::HardClip(1), Cigar::Equal(3)])
+            .into_view(3);
         assert_eq!(c15.read_pos(vpos, false, false).is_err(), true);
 
         // only HardClip and Pad operations
         // c16: 7H5P2H
-        let c16 =
-            CigarString(vec![Cigar::HardClip(7), Cigar::Pad(5), Cigar::HardClip(2)]).into_view(3);
+        let c16 = CigarString::from(vec![Cigar::HardClip(7), Cigar::Pad(5), Cigar::HardClip(2)])
+            .into_view(3);
         assert_eq!(c16.read_pos(vpos, false, false).unwrap(), None);
     }
 
@@ -3178,7 +3207,7 @@ mod tests {
     // Helper: build a Record with a given sequence (and matching dummy quals).
     fn make_record_with_seq(seq: &[u8]) -> Record {
         let mut rec = Record::new();
-        let cigar = CigarString(vec![Cigar::Match(seq.len() as u32)]);
+        let cigar = CigarString::from(vec![Cigar::Match(seq.len() as u32)]);
         let qual: Vec<u8> = vec![30u8; seq.len()];
         rec.set(b"read1", Some(&cigar), seq, &qual);
         rec
@@ -3245,7 +3274,7 @@ mod tests {
     fn test_record_view_matches_record() {
         let seq = b"ACGTN";
         let qual: Vec<u8> = vec![40u8; seq.len()];
-        let cigar = CigarString(vec![Cigar::Match(seq.len() as u32)]);
+        let cigar = CigarString::from(vec![Cigar::Match(seq.len() as u32)]);
         let mut rec = Record::new();
         rec.set(b"testread", Some(&cigar), seq, &qual);
         rec.set_mapq(60);
@@ -3363,15 +3392,15 @@ mod alignment_cigar_tests {
         };
         assert_eq!(alignment.cigar(false), "3S3=1X2I2D1S");
         assert_eq!(
-            CigarString::from_alignment(&alignment, false).0,
-            vec![
+            CigarString::from_alignment(&alignment, false),
+            CigarString::from([
                 Cigar::SoftClip(3),
                 Cigar::Equal(3),
                 Cigar::Diff(1),
                 Cigar::Ins(2),
                 Cigar::Del(2),
                 Cigar::SoftClip(1),
-            ]
+            ])
         );
 
         let alignment = Alignment {
@@ -3388,24 +3417,24 @@ mod alignment_cigar_tests {
         assert_eq!(alignment.cigar(false), "1=2X1I2D1S");
         assert_eq!(alignment.cigar(true), "1=2X1I2D1H");
         assert_eq!(
-            CigarString::from_alignment(&alignment, false).0,
-            vec![
+            CigarString::from_alignment(&alignment, false),
+            CigarString::from([
                 Cigar::Equal(1),
                 Cigar::Diff(2),
                 Cigar::Ins(1),
                 Cigar::Del(2),
                 Cigar::SoftClip(1),
-            ]
+            ])
         );
         assert_eq!(
-            CigarString::from_alignment(&alignment, true).0,
-            vec![
+            CigarString::from_alignment(&alignment, true),
+            CigarString::from([
                 Cigar::Equal(1),
                 Cigar::Diff(2),
                 Cigar::Ins(1),
                 Cigar::Del(2),
                 Cigar::HardClip(1),
-            ]
+            ])
         );
 
         let alignment = Alignment {
@@ -3421,8 +3450,8 @@ mod alignment_cigar_tests {
         };
         assert_eq!(alignment.cigar(false), "1X1=1X");
         assert_eq!(
-            CigarString::from_alignment(&alignment, false).0,
-            vec![Cigar::Diff(1), Cigar::Equal(1), Cigar::Diff(1)]
+            CigarString::from_alignment(&alignment, false),
+            CigarString::from([Cigar::Diff(1), Cigar::Equal(1), Cigar::Diff(1)])
         );
 
         let alignment = Alignment {
@@ -3438,8 +3467,8 @@ mod alignment_cigar_tests {
         };
         assert_eq!(alignment.cigar(false), "1X1=1X");
         assert_eq!(
-            CigarString::from_alignment(&alignment, false).0,
-            vec![Cigar::Diff(1), Cigar::Equal(1), Cigar::Diff(1)]
+            CigarString::from_alignment(&alignment, false),
+            CigarString::from([Cigar::Diff(1), Cigar::Equal(1), Cigar::Diff(1)])
         );
     }
 
@@ -3508,7 +3537,7 @@ mod alignment_cigar_tests {
         ];
         // expected results
         let cigars = [
-            CigarString(vec![
+            CigarString::from(vec![
                 Cigar::HardClip(1),
                 Cigar::Match(10),
                 Cigar::Del(4),
@@ -3519,27 +3548,27 @@ mod alignment_cigar_tests {
                 Cigar::Diff(25),
                 Cigar::SoftClip(11),
             ]),
-            CigarString(vec![Cigar::Match(100)]),
-            CigarString(vec![]),
-            CigarString(vec![
+            CigarString::from(vec![Cigar::Match(100)]),
+            CigarString::from(vec![]),
+            CigarString::from(vec![
                 Cigar::HardClip(1),
                 Cigar::Equal(1),
                 Cigar::HardClip(1),
             ]),
-            CigarString(vec![
+            CigarString::from(vec![
                 Cigar::SoftClip(1),
                 Cigar::Equal(1),
                 Cigar::SoftClip(1),
             ]),
-            CigarString(vec![
+            CigarString::from(vec![
                 Cigar::HardClip(11),
                 Cigar::SoftClip(11),
                 Cigar::Equal(11),
                 Cigar::SoftClip(11),
                 Cigar::HardClip(11),
             ]),
-            CigarString(vec![Cigar::HardClip(10)]),
-            CigarString(vec![Cigar::SoftClip(10)]),
+            CigarString::from(vec![Cigar::HardClip(10)]),
+            CigarString::from(vec![Cigar::SoftClip(10)]),
         ];
         // compare
         for (&cigar_str, truth) in cigar_strs.iter().zip(cigars.iter()) {

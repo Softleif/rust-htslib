@@ -1610,12 +1610,12 @@ CCCCCCCCCCCCCCCCCCC"[..],
 CCCCCCCCCCCCCCCCCCC"[..],
         ];
         let cigars = [
-            CigarString(vec![Cigar::Match(27), Cigar::Del(1), Cigar::Match(73)]),
-            CigarString(vec![Cigar::Match(27), Cigar::Del(1), Cigar::Match(73)]),
-            CigarString(vec![Cigar::Match(27), Cigar::Del(1), Cigar::Match(73)]),
-            CigarString(vec![Cigar::Match(27), Cigar::Del(1), Cigar::Match(73)]),
-            CigarString(vec![Cigar::Match(27), Cigar::Del(1), Cigar::Match(73)]),
-            CigarString(vec![Cigar::Match(27), Cigar::Del(100000), Cigar::Match(73)]),
+            CigarString::from(vec![Cigar::Match(27), Cigar::Del(1), Cigar::Match(73)]),
+            CigarString::from(vec![Cigar::Match(27), Cigar::Del(1), Cigar::Match(73)]),
+            CigarString::from(vec![Cigar::Match(27), Cigar::Del(1), Cigar::Match(73)]),
+            CigarString::from(vec![Cigar::Match(27), Cigar::Del(1), Cigar::Match(73)]),
+            CigarString::from(vec![Cigar::Match(27), Cigar::Del(1), Cigar::Match(73)]),
+            CigarString::from(vec![Cigar::Match(27), Cigar::Del(100000), Cigar::Match(73)]),
         ];
         (names, flags, seqs, quals, cigars)
     }
@@ -1886,7 +1886,7 @@ CCCCCCCCCCCCCCCCCCC"[..],
         let mut rec = Record::new();
         rec.set(
             b"123",
-            Some(&CigarString(vec![Cigar::Match(3)])),
+            Some(&CigarString::from(vec![Cigar::Match(3)])),
             b"AAA",
             b"III",
         );
@@ -1898,7 +1898,10 @@ CCCCCCCCCCCCCCCCCCC"[..],
 
         rec.set(
             b"1234",
-            Some(&CigarString(vec![Cigar::SoftClip(1), Cigar::Match(3)])),
+            Some(&CigarString::from(vec![
+                Cigar::SoftClip(1),
+                Cigar::Match(3),
+            ])),
             b"AAAA",
             b"IIII",
         );
@@ -1909,7 +1912,7 @@ CCCCCCCCCCCCCCCCCCC"[..],
 
         rec.set(
             b"12",
-            Some(&CigarString(vec![Cigar::Match(2)])),
+            Some(&CigarString::from(vec![Cigar::Match(2)])),
             b"AA",
             b"II",
         );
@@ -2011,7 +2014,7 @@ CCCCCCCCCCCCCCCCCCC"[..],
             assert_eq!(rec.aux(b"NM").unwrap(), Aux::I32(15));
 
             // boring cigar
-            let new_cigar = CigarString(vec![Cigar::Match(rec.seq_len() as u32)]);
+            let new_cigar = CigarString::from(vec![Cigar::Match(rec.seq_len() as u32)]);
             assert_ne!(*rec.cigar(), new_cigar);
             rec.set_cigar(Some(&new_cigar));
             assert_eq!(*rec.cigar(), new_cigar);
@@ -2031,7 +2034,7 @@ CCCCCCCCCCCCCCCCCCC"[..],
                     }
                 })
                 .collect::<Vec<_>>();
-            let new_cigar = CigarString(new_cigar);
+            let new_cigar = CigarString::from(new_cigar);
             assert_ne!(*rec.cigar(), new_cigar);
             rec.set_cigar(Some(&new_cigar));
             assert_eq!(*rec.cigar(), new_cigar);
@@ -2042,7 +2045,7 @@ CCCCCCCCCCCCCCCCCCC"[..],
             assert_eq!(rec.aux(b"NM").unwrap(), Aux::I32(15));
 
             // empty cigar
-            let new_cigar = CigarString(Vec::new());
+            let new_cigar = CigarString::from(Vec::new());
             assert_ne!(*rec.cigar(), new_cigar);
             rec.set_cigar(None);
             assert_eq!(*rec.cigar(), new_cigar);

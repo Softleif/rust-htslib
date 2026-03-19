@@ -161,6 +161,8 @@ pub enum BcfError {
     GenomicSeek { contig: String, start: u64 },
     #[error("failed to write BCF/VCF record (out of disk space?)")]
     WriteRecord,
+    #[error("reader index {idx} is out of bounds (reader_count = {count})")]
+    InvalidReaderIndex { idx: u32, count: u32 },
     #[error("error setting threads for BCF/VCF file reading")]
     SetThreads,
 }
@@ -570,15 +572,16 @@ pub mod synced {
         }
 
         /// Remove reader with the given index.
-        pub fn remove_reader(&mut self, idx: u32) {
-            if idx >= self.reader_count() {
-                panic!("Invalid reader!");
-            } else {
-                unsafe {
-                    crate::htslib::bcf_sr_remove_reader(self.inner, idx as i32);
-                }
-                self.headers.remove(idx as usize);
+        pub fn remove_reader(&mut self, idx: u32) -> Result<()> {
+            let count = self.reader_count();
+            if idx >= count {
+                return Err(BcfError::InvalidReaderIndex { idx, count });
             }
+            unsafe {
+                crate::htslib::bcf_sr_remove_reader(self.inner, idx as i32);
+            }
+            self.headers.remove(idx as usize);
+            Ok(())
         }
 
         /// Return number of open files/readers.
@@ -600,7 +603,7 @@ pub mod synced {
                 match self.current_region {
                     Some((rid, _start, end)) => {
                         for idx in 0..self.reader_count() {
-                            if !self.has_line(idx) {
+                            if !self.has_line(idx)? {
                                 continue;
                             }
                             unsafe {
@@ -620,40 +623,38 @@ pub mod synced {
         }
 
         /// Return whether the given reader has the line.
-        pub fn has_line(&self, idx: u32) -> bool {
-            if idx >= self.reader_count() {
-                panic!("Invalid reader!");
-            } else {
-                unsafe { (*(*self.inner).has_line.offset(idx as isize)) != 0 }
+        pub fn has_line(&self, idx: u32) -> Result<bool> {
+            let count = self.reader_count();
+            if idx >= count {
+                return Err(BcfError::InvalidReaderIndex { idx, count });
             }
+            Ok(unsafe { (*(*self.inner).has_line.offset(idx as isize)) != 0 })
         }
 
         /// Return record from the given reader, if any.
-        pub fn record(&self, idx: u32) -> Option<Record> {
-            if self.has_line(idx) {
-                let record = Record::new(self.headers[idx as usize].clone());
-                unsafe {
-                    crate::htslib::bcf_copy(
-                        record.inner,
-                        *(*(*self.inner).readers.offset(idx as isize))
-                            .buffer
-                            .offset(0),
-                    );
-                }
-                Some(record)
-            } else {
-                None
+        pub fn record(&self, idx: u32) -> Result<Option<Record>> {
+            if !self.has_line(idx)? {
+                return Ok(None);
             }
+            let record = Record::new(self.headers[idx as usize].clone());
+            unsafe {
+                crate::htslib::bcf_copy(
+                    record.inner,
+                    *(*(*self.inner).readers.offset(idx as isize))
+                        .buffer
+                        .offset(0),
+                );
+            }
+            Ok(Some(record))
         }
 
         /// Return header from the given reader.
-        pub fn header(&self, idx: u32) -> &HeaderView {
-            // TODO: is the mutability here correct?
-            if idx >= self.reader_count() {
-                panic!("Invalid reader!");
-            } else {
-                &self.headers[idx as usize]
+        pub fn header(&self, idx: u32) -> Result<&HeaderView> {
+            let count = self.reader_count();
+            if idx >= count {
+                return Err(BcfError::InvalidReaderIndex { idx, count });
             }
+            Ok(&self.headers[idx as usize])
         }
 
         /// Jump to the given region.
@@ -666,7 +667,7 @@ pub mod synced {
         /// * `end` - `0`-based end coordinate of region on reference.
         pub fn fetch(&mut self, rid: u32, start: u64, end: u64) -> Result<()> {
             let contig = {
-                let contig = self.header(0).rid2name(rid)?;
+                let contig = self.header(0)?.rid2name(rid)?;
                 ffi::CString::new(contig).map_err(|_| BcfError::UnknownRID { rid })?
             };
             if unsafe { htslib::bcf_sr_seek(self.inner, contig.as_ptr(), start as i64) } != 0 {
@@ -1569,18 +1570,18 @@ mod tests {
 
         let res1 = reader.read_next();
         assert_eq!(res1.unwrap(), 2);
-        assert!(reader.has_line(0));
-        assert!(reader.has_line(1));
+        assert!(reader.has_line(0).unwrap());
+        assert!(reader.has_line(1).unwrap());
 
         let res2 = reader.read_next();
         assert_eq!(res2.unwrap(), 1);
-        assert!(reader.has_line(0));
-        assert!(!reader.has_line(1));
+        assert!(reader.has_line(0).unwrap());
+        assert!(!reader.has_line(1).unwrap());
 
         let res3 = reader.read_next();
         assert_eq!(res3.unwrap(), 1);
-        assert!(!reader.has_line(0));
-        assert!(reader.has_line(1));
+        assert!(!reader.has_line(0).unwrap());
+        assert!(reader.has_line(1).unwrap());
 
         let res4 = reader.read_next();
         assert_eq!(res4.unwrap(), 0);
@@ -1600,21 +1601,64 @@ mod tests {
         reader.fetch(0, 0, 1000).unwrap();
         let res1 = reader.read_next();
         assert_eq!(res1.unwrap(), 2);
-        assert!(reader.has_line(0));
-        assert!(reader.has_line(1));
+        assert!(reader.has_line(0).unwrap());
+        assert!(reader.has_line(1).unwrap());
 
         let res2 = reader.read_next();
         assert_eq!(res2.unwrap(), 1);
-        assert!(reader.has_line(0));
-        assert!(!reader.has_line(1));
+        assert!(reader.has_line(0).unwrap());
+        assert!(!reader.has_line(1).unwrap());
 
         let res3 = reader.read_next();
         assert_eq!(res3.unwrap(), 1);
-        assert!(!reader.has_line(0));
-        assert!(reader.has_line(1));
+        assert!(!reader.has_line(0).unwrap());
+        assert!(reader.has_line(1).unwrap());
 
         let res4 = reader.read_next();
         assert_eq!(res4.unwrap(), 0);
+    }
+
+    #[test]
+    fn test_synced_reader_has_line_out_of_bounds() {
+        let mut reader = synced::SyncedReader::new().unwrap();
+        reader.add_reader("test/test_left.vcf.gz").unwrap();
+        assert_eq!(reader.reader_count(), 1);
+        // Valid index works
+        assert!(reader.has_line(0).is_ok());
+        // Out of bounds returns error, not panic/segfault
+        assert!(reader.has_line(1).is_err());
+        assert!(reader.has_line(u32::MAX).is_err());
+    }
+
+    #[test]
+    fn test_synced_reader_header_out_of_bounds() {
+        let mut reader = synced::SyncedReader::new().unwrap();
+        reader.add_reader("test/test_left.vcf.gz").unwrap();
+        assert!(reader.header(0).is_ok());
+        assert!(reader.header(1).is_err());
+    }
+
+    #[test]
+    fn test_synced_reader_record_out_of_bounds() {
+        let mut reader = synced::SyncedReader::new().unwrap();
+        reader.add_reader("test/test_left.vcf.gz").unwrap();
+        assert!(reader.record(1).is_err());
+    }
+
+    #[test]
+    fn test_synced_reader_remove_reader_out_of_bounds() {
+        let mut reader = synced::SyncedReader::new().unwrap();
+        reader.add_reader("test/test_left.vcf.gz").unwrap();
+        assert!(reader.remove_reader(1).is_err());
+        assert!(reader.remove_reader(0).is_ok());
+        assert_eq!(reader.reader_count(), 0);
+    }
+
+    #[test]
+    fn test_synced_reader_fetch_no_readers() {
+        let mut reader = synced::SyncedReader::new().unwrap();
+        // fetch calls header(0) internally — should error, not panic
+        assert!(reader.fetch(0, 0, 1000).is_err());
     }
 
     #[test]

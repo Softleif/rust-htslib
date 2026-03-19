@@ -1861,6 +1861,163 @@ static ENCODE_BASE: [u8; 256] = [
     15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
 ];
 
+/// Scalar sequence decoder using the DECODE_PAIR lookup table.
+fn decode_seq_scalar(encoded: &[u8], len: usize) -> Vec<u8> {
+    let full_bytes = len / 2;
+    assert!(encoded.len() >= len.div_ceil(2));
+    let mut result = vec![0u8; len];
+
+    for (chunk, &byte) in result[..full_bytes * 2]
+        .chunks_exact_mut(2)
+        .zip(&encoded[..full_bytes])
+    {
+        let pair = DECODE_PAIR[byte as usize];
+        chunk[0] = pair[0];
+        chunk[1] = pair[1];
+    }
+
+    if len % 2 == 1 {
+        result[len - 1] = DECODE_PAIR[encoded[full_bytes] as usize][0];
+    }
+
+    result
+}
+
+/// SSSE3 sequence decoder: uses `pshufb` as a 16-entry SIMD LUT to decode
+/// 32 bases (16 packed bytes) per iteration.
+///
+/// # Safety
+///
+/// Caller must ensure SSSE3 is available on the current CPU.
+/// `encoded` must contain at least `(len + 1) / 2` bytes (the standard
+/// BAM packing invariant: two bases per byte, with a possible trailing
+/// half-byte for odd `len`).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "ssse3")]
+unsafe fn decode_seq_ssse3(encoded: &[u8], len: usize) -> Vec<u8> {
+    use std::arch::x86_64::*;
+
+    let full_bytes = len / 2;
+    assert!(encoded.len() >= len.div_ceil(2));
+    let mut result = vec![0u8; len];
+
+    // Load the 16-byte DECODE_BASE table into a SIMD register
+    let lut = _mm_loadu_si128(DECODE_BASE.as_ptr() as *const __m128i);
+    let mask_lo = _mm_set1_epi8(0x0F);
+
+    let mut i = 0; // index into encoded bytes
+    let mut o = 0; // index into result
+
+    // Main SIMD loop: 16 packed bytes → 32 decoded bases per iteration.
+    //
+    // Bounds reasoning:
+    //   - Read:  encoded[i..i+16], guarded by i + 16 <= full_bytes <= encoded.len()
+    //   - Write: result[o..o+32],  guarded by o + 32 = 2*(i+16) <= 2*full_bytes <= len
+    while i + 16 <= full_bytes {
+        let packed = _mm_loadu_si128(encoded.as_ptr().add(i) as *const __m128i);
+
+        // Extract high and low nibbles of each byte.
+        // _mm_srli_epi16 shifts 16-bit lanes, but the & 0x0F mask discards
+        // any cross-byte bleed, giving correct per-byte high nibbles.
+        let hi = _mm_and_si128(_mm_srli_epi16(packed, 4), mask_lo);
+        let lo = _mm_and_si128(packed, mask_lo);
+
+        // Decode nibbles → ASCII bases via shuffle LUT
+        let decoded_hi = _mm_shuffle_epi8(lut, hi);
+        let decoded_lo = _mm_shuffle_epi8(lut, lo);
+
+        // Interleave: [hi0,lo0, hi1,lo1, ..., hi7,lo7] and [hi8,lo8, ..., hi15,lo15]
+        let out_a = _mm_unpacklo_epi8(decoded_hi, decoded_lo);
+        let out_b = _mm_unpackhi_epi8(decoded_hi, decoded_lo);
+
+        _mm_storeu_si128(result.as_mut_ptr().add(o) as *mut __m128i, out_a);
+        _mm_storeu_si128(result.as_mut_ptr().add(o + 16) as *mut __m128i, out_b);
+
+        i += 16;
+        o += 32;
+    }
+
+    // Scalar tail for remaining full bytes (at most 15 iterations)
+    while i < full_bytes {
+        let pair = DECODE_PAIR[encoded[i] as usize];
+        result[o] = pair[0];
+        result[o + 1] = pair[1];
+        i += 1;
+        o += 2;
+    }
+
+    // Trailing odd base
+    if len % 2 == 1 {
+        result[o] = DECODE_PAIR[encoded[i] as usize][0];
+    }
+
+    result
+}
+
+/// NEON sequence decoder: uses `vqtbl1q_u8` as a 16-entry SIMD LUT to
+/// decode 32 bases (16 packed bytes) per iteration.
+///
+/// # Safety
+///
+/// `encoded` must contain at least `(len + 1) / 2` bytes (the standard
+/// BAM packing invariant: two bases per byte, with a possible trailing
+/// half-byte for odd `len`).
+#[cfg(target_arch = "aarch64")]
+unsafe fn decode_seq_neon(encoded: &[u8], len: usize) -> Vec<u8> {
+    use std::arch::aarch64::*;
+
+    let full_bytes = len / 2;
+    assert!(encoded.len() >= len.div_ceil(2));
+    let mut result = vec![0u8; len];
+
+    // Load the 16-byte DECODE_BASE table into a NEON register
+    let lut = vld1q_u8(DECODE_BASE.as_ptr());
+    let mask_lo = vdupq_n_u8(0x0F);
+
+    let mut i = 0;
+    let mut o = 0;
+
+    // Main SIMD loop: 16 packed bytes → 32 decoded bases per iteration.
+    //
+    // Bounds reasoning: same as SSSE3 path above.
+    while i + 16 <= full_bytes {
+        let packed = vld1q_u8(encoded.as_ptr().add(i));
+
+        // Extract nibbles (vshrq_n_u8 is a true per-byte shift)
+        let hi = vshrq_n_u8(packed, 4);
+        let lo = vandq_u8(packed, mask_lo);
+
+        // Decode via table lookup
+        let decoded_hi = vqtbl1q_u8(lut, hi);
+        let decoded_lo = vqtbl1q_u8(lut, lo);
+
+        // Interleave into pairs: [hi0,lo0, hi1,lo1, ...]
+        let out_a = vzip1q_u8(decoded_hi, decoded_lo);
+        let out_b = vzip2q_u8(decoded_hi, decoded_lo);
+
+        vst1q_u8(result.as_mut_ptr().add(o), out_a);
+        vst1q_u8(result.as_mut_ptr().add(o + 16), out_b);
+
+        i += 16;
+        o += 32;
+    }
+
+    // Scalar tail (at most 15 iterations)
+    while i < full_bytes {
+        let pair = DECODE_PAIR[encoded[i] as usize];
+        result[o] = pair[0];
+        result[o + 1] = pair[1];
+        i += 1;
+        o += 2;
+    }
+
+    if len % 2 == 1 {
+        result[o] = DECODE_PAIR[encoded[i] as usize][0];
+    }
+
+    result
+}
+
 #[inline]
 fn encoded_base(encoded_seq: &[u8], i: usize) -> u8 {
     (encoded_seq[i / 2] >> ((!i & 1) << 2)) & 0b1111
@@ -1913,26 +2070,25 @@ impl Seq<'_> {
     }
 
     /// Return decoded sequence. Complexity: O(m) with m being the read length.
+    ///
+    /// Uses SIMD acceleration when available (SSSE3 on x86_64, NEON on aarch64).
     pub fn as_bytes(&self) -> Vec<u8> {
-        let full_bytes = self.len / 2;
-        let mut result = vec![0u8; self.len];
-
-        // Process full bytes: 2 bases each via precomputed pair lookup
-        for (chunk, &byte) in result[..full_bytes * 2]
-            .chunks_exact_mut(2)
-            .zip(&self.encoded[..full_bytes])
+        #[cfg(target_arch = "x86_64")]
         {
-            let pair = DECODE_PAIR[byte as usize];
-            chunk[0] = pair[0];
-            chunk[1] = pair[1];
+            if is_x86_feature_detected!("ssse3") {
+                // SAFETY: we just verified SSSE3 is available.
+                return unsafe { decode_seq_ssse3(self.encoded, self.len) };
+            }
         }
 
-        // Handle trailing base if odd length
-        if self.len % 2 == 1 {
-            result[self.len - 1] = DECODE_PAIR[self.encoded[full_bytes] as usize][0];
+        #[cfg(target_arch = "aarch64")]
+        {
+            // NEON is always available on aarch64.
+            return unsafe { decode_seq_neon(self.encoded, self.len) };
         }
 
-        result
+        #[allow(unreachable_code)]
+        decode_seq_scalar(self.encoded, self.len)
     }
 
     /// Return length (in bases) of the sequence.
@@ -3717,7 +3873,7 @@ mod proptests {
 
     /// Pack ASCII bases into BAM 4-bit encoding (same logic as Record::set).
     fn encode_bases(bases: &[u8]) -> Vec<u8> {
-        let mut encoded = vec![0u8; (bases.len() + 1) / 2];
+        let mut encoded = vec![0u8; bases.len().div_ceil(2)];
         for (j, chunk) in bases.chunks(2).enumerate() {
             encoded[j] = ENCODE_BASE[chunk[0] as usize] << 4
                 | if chunk.len() == 2 {
@@ -3736,7 +3892,7 @@ mod proptests {
     /// might not contain.
     fn raw_seq_strategy() -> impl Strategy<Value = (Vec<u8>, usize)> {
         (0usize..=512).prop_flat_map(|len| {
-            let n_bytes = (len + 1) / 2;
+            let n_bytes = len.div_ceil(2);
             (proptest::collection::vec(any::<u8>(), n_bytes), Just(len))
         })
     }
@@ -3867,6 +4023,152 @@ mod proptests {
             let pair = DECODE_PAIR[byte as usize];
             prop_assert_eq!(pair[0], DECODE_BASE[(byte >> 4) as usize]);
             prop_assert_eq!(pair[1], DECODE_BASE[(byte & 0xf) as usize]);
+        }
+
+        /// The SIMD/optimized path must produce identical output to the
+        /// scalar path for all inputs. This catches SIMD-specific bugs
+        /// (wrong interleave order, nibble extraction errors, etc.).
+        #[test]
+        fn simd_matches_scalar((encoded, len) in raw_seq_strategy()) {
+            let scalar = decode_seq_scalar(&encoded, len);
+            let seq = Seq { encoded: &encoded, len };
+            prop_assert_eq!(seq.as_bytes(), scalar);
+        }
+
+        /// CigarString construction methods must all produce equivalent
+        /// results: From<Vec>, FromIterator, and collect().
+        #[test]
+        fn cigar_string_construction_equivalence(
+            ops in proptest::collection::vec(
+                prop_oneof![
+                    (1u32..1000).prop_map(Cigar::Match),
+                    (1u32..1000).prop_map(Cigar::Ins),
+                    (1u32..1000).prop_map(Cigar::Del),
+                    (1u32..1000).prop_map(Cigar::Equal),
+                    (1u32..1000).prop_map(Cigar::Diff),
+                    (1u32..1000).prop_map(Cigar::SoftClip),
+                ],
+                0..=20,
+            )
+        ) {
+            let from_vec = CigarString::from(ops.clone());
+            let from_iter: CigarString = ops.iter().copied().collect();
+
+            prop_assert_eq!(&from_vec, &from_iter);
+            prop_assert_eq!(from_vec.len(), ops.len());
+
+            // Deref, Index, and iter() must agree
+            for (i, expected) in ops.iter().enumerate() {
+                prop_assert_eq!(&from_vec[i], expected);
+            }
+            let via_iter: Vec<&Cigar> = from_vec.iter().collect();
+            let via_into_iter: Vec<&Cigar> = (&from_vec).into_iter().collect();
+            prop_assert_eq!(via_iter, via_into_iter);
+        }
+
+        /// Display → TryFrom roundtrip for SAM-valid CIGAR strings
+        /// (no clips, since clip placement rules make arbitrary
+        /// op sequences invalid for parsing).
+        #[test]
+        fn cigar_display_roundtrip(
+            ops in proptest::collection::vec(
+                prop_oneof![
+                    (1u32..1000).prop_map(Cigar::Match),
+                    (1u32..1000).prop_map(Cigar::Ins),
+                    (1u32..1000).prop_map(Cigar::Del),
+                    (1u32..1000).prop_map(Cigar::Equal),
+                    (1u32..1000).prop_map(Cigar::Diff),
+                    (1u32..1000).prop_map(Cigar::RefSkip),
+                    (1u32..1000).prop_map(Cigar::Pad),
+                ],
+                1..=20,
+            )
+        ) {
+            let cigar = CigarString::from(ops);
+            let text = format!("{}", cigar);
+            let parsed = CigarString::try_from(text.as_str()).unwrap();
+            prop_assert_eq!(cigar, parsed);
+        }
+    }
+
+    /// Deterministic edge-case tests for lengths around SIMD boundaries.
+    /// The SIMD loop processes 16 packed bytes (32 bases) per iteration,
+    /// so we test lengths right around that stride.
+    #[test]
+    fn seq_decode_simd_boundary_lengths() {
+        // Lengths that exercise: no SIMD (0..31), exact boundary (32, 64),
+        // one past (33, 65), one before (31, 63), and odd variants.
+        for len in [
+            0usize, 1, 2, 15, 16, 30, 31, 32, 33, 34, 63, 64, 65, 127, 128, 129,
+        ] {
+            let n_bytes = len.div_ceil(2);
+            // Use a recognizable pattern: byte i = i as u8
+            let encoded: Vec<u8> = (0..n_bytes).map(|i| i as u8).collect();
+            let seq = Seq {
+                encoded: &encoded,
+                len,
+            };
+            let result = seq.as_bytes();
+            let scalar = decode_seq_scalar(&encoded, len);
+
+            assert_eq!(result.len(), len, "wrong length for len={len}");
+            assert_eq!(result, scalar, "SIMD/scalar mismatch for len={len}");
+
+            // Verify each base individually
+            for (i, &expected) in result.iter().enumerate() {
+                assert_eq!(
+                    seq.get(i),
+                    Some(expected),
+                    "get({i}) mismatch for len={len}"
+                );
+            }
+            assert_eq!(seq.get(len), None);
+        }
+    }
+
+    /// Test with uniform byte patterns to catch nibble-swap bugs.
+    #[test]
+    fn seq_decode_uniform_patterns() {
+        let len = 128;
+        let n_bytes = len / 2;
+
+        for byte_val in [0x00, 0x11, 0x24, 0x42, 0x88, 0xFF] {
+            let encoded = vec![byte_val; n_bytes];
+            let seq = Seq {
+                encoded: &encoded,
+                len,
+            };
+            let result = seq.as_bytes();
+            let scalar = decode_seq_scalar(&encoded, len);
+            assert_eq!(result, scalar, "mismatch for uniform byte 0x{byte_val:02X}");
+
+            // For uniform bytes, even positions should all be the same
+            // and odd positions should all be the same.
+            let hi_base = DECODE_BASE[(byte_val >> 4) as usize];
+            let lo_base = DECODE_BASE[(byte_val & 0xF) as usize];
+            for i in (0..len).step_by(2) {
+                assert_eq!(result[i], hi_base);
+                assert_eq!(result[i + 1], lo_base);
+            }
+        }
+
+        // Asymmetric: 0x12 vs 0x21 — catches interleave-order bugs
+        let enc_12 = vec![0x12u8; n_bytes];
+        let enc_21 = vec![0x21u8; n_bytes];
+        let r12 = Seq {
+            encoded: &enc_12,
+            len,
+        }
+        .as_bytes();
+        let r21 = Seq {
+            encoded: &enc_21,
+            len,
+        }
+        .as_bytes();
+        // High/low nibbles are swapped, so decoded bases should swap
+        for i in 0..len / 2 {
+            assert_eq!(r12[2 * i], r21[2 * i + 1]);
+            assert_eq!(r12[2 * i + 1], r21[2 * i]);
         }
     }
 }

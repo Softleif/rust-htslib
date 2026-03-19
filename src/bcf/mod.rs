@@ -105,6 +105,7 @@
 
 use std::ffi;
 use std::path::Path;
+use std::path::PathBuf;
 use std::str;
 use std::sync::Arc;
 
@@ -116,8 +117,55 @@ pub mod index;
 pub mod record;
 
 use crate::bcf::header::{HeaderView, SampleSubset};
-use crate::errors::{Error, Result};
 use crate::htslib;
+
+#[derive(thiserror::Error, Debug, PartialEq)]
+pub enum BcfError {
+    #[error("file not found: {0:?}")]
+    FileNotFound(PathBuf),
+    #[error("non-unicode path: {0:?}")]
+    NonUnicodePath(PathBuf),
+    #[error("failed to open BCF/VCF: {target}")]
+    Open { target: String },
+    #[error("error allocating internal data structure for BCF/VCF reader (out of memory?)")]
+    AllocationError,
+    #[error("invalid record in BCF/VCF file")]
+    InvalidRecord,
+    #[error("tag {tag} undefined in BCF/VCF header")]
+    UndefinedTag { tag: String },
+    #[error("unexpected type for tag {tag} in BCF/VCF file")]
+    UnexpectedType { tag: String },
+    #[error("tag {tag} missing from record {record} in BCF/VCF file")]
+    MissingTag { tag: String, record: String },
+    #[error("error setting tag {tag} in BCF/VCF record (out of memory?)")]
+    SetTag { tag: String },
+    #[error("ID {rid} not found in BCF/VCF header")]
+    UnknownRID { rid: u32 },
+    #[error("contig {contig} not found in BCF/VCF header")]
+    UnknownContig { contig: String },
+    #[error("ID {id} not found in BCF/VCF header")]
+    UnknownID { id: String },
+    #[error("sample {name} not found in BCF/VCF header")]
+    UnknownSample { name: String },
+    #[error("duplicate sample names given for subsetting BCF/VCF")]
+    DuplicateSampleNames,
+    #[error("failed to set values in BCF/VCF record (out of memory?)")]
+    SetValues,
+    #[error("failed to remove alleles in BCF/VCF record")]
+    RemoveAlleles,
+    #[error("failed to render BCF record as string")]
+    ToString,
+    #[error("failed to translate BCF/VCF record")]
+    Translate,
+    #[error("error seeking to {contig:?}:{start} in indexed BCF/VCF file")]
+    GenomicSeek { contig: String, start: u64 },
+    #[error("failed to write BCF/VCF record (out of disk space?)")]
+    WriteRecord,
+    #[error("error setting threads for BCF/VCF file reading")]
+    SetThreads,
+}
+
+type Result<T> = std::result::Result<T, BcfError>;
 
 pub use crate::bcf::header::{Header, HeaderRecord};
 pub use crate::bcf::record::Record;
@@ -172,7 +220,7 @@ pub unsafe fn set_threads(hts_file: *mut htslib::htsFile, n_threads: usize) -> R
 
     let r = htslib::hts_set_threads(hts_file, n_threads as i32);
     if r != 0 {
-        Err(Error::SetThreads)
+        Err(BcfError::SetThreads)
     } else {
         Ok(())
     }
@@ -181,11 +229,14 @@ pub unsafe fn set_threads(hts_file: *mut htslib::htsFile, n_threads: usize) -> R
 impl Reader {
     /// Create a new reader from a given path.
     pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Self> {
-        match path.as_ref().to_str() {
-            Some(p) if !path.as_ref().exists() => Err(Error::FileNotFound { path: p.into() }),
-            Some(p) => Self::new(p.as_bytes()),
-            _ => Err(Error::NonUnicodePath),
+        let path = path.as_ref();
+        if !path.exists() {
+            return Err(BcfError::FileNotFound(path.to_owned()));
         }
+        let p = path
+            .to_str()
+            .ok_or_else(|| BcfError::NonUnicodePath(path.to_owned()))?;
+        Self::new(p.as_bytes())
     }
 
     /// Create a new reader from a given URL.
@@ -220,7 +271,7 @@ impl Read for Reader {
                 Some(Ok(()))
             }
             -1 => None,
-            _ => Some(Err(Error::BcfInvalidRecord)),
+            _ => Some(Err(BcfError::InvalidRecord)),
         }
     }
 
@@ -272,13 +323,14 @@ impl IndexedReader {
     /// * `path` - the path to open.
     pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
-        match path.to_str() {
-            Some(p) if path.exists() => {
-                Self::new(&ffi::CString::new(p).map_err(|_| Error::NonUnicodePath)?)
-            }
-            Some(p) => Err(Error::FileNotFound { path: p.into() }),
-            None => Err(Error::NonUnicodePath),
+        if !path.exists() {
+            return Err(BcfError::FileNotFound(path.to_owned()));
         }
+        let p = path
+            .to_str()
+            .ok_or_else(|| BcfError::NonUnicodePath(path.to_owned()))?;
+        let cstr = ffi::CString::new(p).map_err(|_| BcfError::NonUnicodePath(path.to_owned()))?;
+        Self::new(&cstr)
     }
 
     /// Create a new `IndexedReader` from an URL.
@@ -310,7 +362,7 @@ impl IndexedReader {
                 current_region: None,
             })
         } else {
-            Err(Error::BcfOpen {
+            Err(BcfError::Open {
                 target: path.to_str().unwrap().to_owned(),
             })
         }
@@ -330,9 +382,9 @@ impl IndexedReader {
     /// The entire contig can be fetched by setting `start` to `0` and `end` to `None`.
     pub fn fetch(&mut self, rid: u32, start: u64, end: Option<u64>) -> Result<()> {
         let contig = self.header.rid2name(rid)?;
-        let contig = ffi::CString::new(contig).unwrap();
+        let contig = ffi::CString::new(contig).map_err(|_| BcfError::UnknownRID { rid })?;
         if unsafe { htslib::bcf_sr_seek(self.inner, contig.as_ptr(), start as i64) } != 0 {
-            Err(Error::GenomicSeek {
+            Err(BcfError::GenomicSeek {
                 contig: contig.to_str().unwrap().to_owned(),
                 start,
             })
@@ -348,7 +400,7 @@ impl Read for IndexedReader {
         match unsafe { htslib::bcf_sr_next_line(self.inner) } {
             0 => {
                 if unsafe { (*self.inner).errnum } != 0 {
-                    Some(Err(Error::BcfInvalidRecord))
+                    Some(Err(BcfError::InvalidRecord))
                 } else {
                     None
                 }
@@ -397,7 +449,7 @@ impl Read for IndexedReader {
 
         let r = unsafe { htslib::bcf_sr_set_threads(self.inner, n_threads as i32) };
         if r != 0 {
-            Err(Error::SetThreads)
+            Err(BcfError::SetThreads)
         } else {
             Ok(())
         }
@@ -463,7 +515,7 @@ pub mod synced {
         pub fn new() -> Result<Self> {
             let inner = unsafe { crate::htslib::bcf_sr_init() };
             if inner.is_null() {
-                return Err(Error::BcfAllocationError);
+                return Err(BcfError::AllocationError);
             }
 
             Ok(SyncedReader {
@@ -490,29 +542,31 @@ pub mod synced {
 
         /// Add new reader with the path to the file.
         pub fn add_reader<P: AsRef<Path>>(&mut self, path: P) -> Result<()> {
-            match path.as_ref().to_str() {
-                Some(p) if path.as_ref().exists() => {
-                    let p_cstring = ffi::CString::new(p).unwrap();
-                    let res =
-                        unsafe { crate::htslib::bcf_sr_add_reader(self.inner, p_cstring.as_ptr()) };
-
-                    if res == 0 {
-                        return Err(Error::BcfOpen {
-                            target: p.to_owned(),
-                        });
-                    }
-
-                    let i = (self.reader_count() - 1) as isize;
-                    let header = Arc::new(unsafe {
-                        HeaderView::from_ptr(crate::htslib::bcf_hdr_dup(
-                            (*(*self.inner).readers.offset(i)).header,
-                        ))
-                    });
-                    self.headers.push(header);
-                    Ok(())
-                }
-                _ => Err(Error::NonUnicodePath),
+            let path = path.as_ref();
+            if !path.exists() {
+                return Err(BcfError::FileNotFound(path.to_owned()));
             }
+            let p = path
+                .to_str()
+                .ok_or_else(|| BcfError::NonUnicodePath(path.to_owned()))?;
+            let p_cstring =
+                ffi::CString::new(p).map_err(|_| BcfError::NonUnicodePath(path.to_owned()))?;
+            let res = unsafe { crate::htslib::bcf_sr_add_reader(self.inner, p_cstring.as_ptr()) };
+
+            if res == 0 {
+                return Err(BcfError::Open {
+                    target: p.to_owned(),
+                });
+            }
+
+            let i = (self.reader_count() - 1) as isize;
+            let header = Arc::new(unsafe {
+                HeaderView::from_ptr(crate::htslib::bcf_hdr_dup(
+                    (*(*self.inner).readers.offset(i)).header,
+                ))
+            });
+            self.headers.push(header);
+            Ok(())
         }
 
         /// Remove reader with the given index.
@@ -538,7 +592,7 @@ pub mod synced {
 
             if num == 0 {
                 if unsafe { (*self.inner).errnum } != 0 {
-                    return Err(Error::BcfInvalidRecord);
+                    return Err(BcfError::InvalidRecord);
                 }
                 Ok(0)
             } else {
@@ -612,11 +666,11 @@ pub mod synced {
         /// * `end` - `0`-based end coordinate of region on reference.
         pub fn fetch(&mut self, rid: u32, start: u64, end: u64) -> Result<()> {
             let contig = {
-                let contig = self.header(0).rid2name(rid).unwrap(); //.clone();
-                ffi::CString::new(contig).unwrap()
+                let contig = self.header(0).rid2name(rid)?;
+                ffi::CString::new(contig).map_err(|_| BcfError::UnknownRID { rid })?
             };
             if unsafe { htslib::bcf_sr_seek(self.inner, contig.as_ptr(), start as i64) } != 0 {
-                Err(Error::GenomicSeek {
+                Err(BcfError::GenomicSeek {
                     contig: contig.to_str().unwrap().to_owned(),
                     start,
                 })
@@ -665,11 +719,11 @@ impl Writer {
         uncompressed: bool,
         format: Format,
     ) -> Result<Self> {
-        if let Some(p) = path.as_ref().to_str() {
-            Ok(Self::new(p.as_bytes(), header, uncompressed, format)?)
-        } else {
-            Err(Error::NonUnicodePath)
-        }
+        let path = path.as_ref();
+        let p = path
+            .to_str()
+            .ok_or_else(|| BcfError::NonUnicodePath(path.to_owned()))?;
+        Self::new(p.as_bytes(), header, uncompressed, format)
     }
 
     /// Create a new writer from a URL.
@@ -766,7 +820,7 @@ impl Writer {
     /// - `record` - The `Record` to write.
     pub fn write(&mut self, record: &record::Record) -> Result<()> {
         if unsafe { htslib::bcf_write(self.inner, self.header.inner, record.inner) } == -1 {
-            Err(Error::WriteRecord)
+            Err(BcfError::WriteRecord)
         } else {
             Ok(())
         }
@@ -817,12 +871,14 @@ impl<R: Read> Iterator for Records<'_, R> {
 
 /// Wrapper for opening a BCF file.
 fn bcf_open(target: &[u8], mode: &[u8]) -> Result<*mut htslib::htsFile> {
-    let p = ffi::CString::new(target).unwrap();
+    let p = ffi::CString::new(target).map_err(|_| BcfError::Open {
+        target: String::from_utf8_lossy(target).into_owned(),
+    })?;
     let c_str = ffi::CString::new(mode).unwrap();
     let ret = unsafe { htslib::hts_open(p.as_ptr(), c_str.as_ptr()) };
 
     if ret.is_null() {
-        return Err(Error::BcfOpen {
+        return Err(BcfError::Open {
             target: str::from_utf8(target).unwrap().to_owned(),
         });
     }
@@ -831,7 +887,7 @@ fn bcf_open(target: &[u8], mode: &[u8]) -> Result<*mut htslib::htsFile> {
         if !(mode.contains(&b'w')
             || (*ret).format.category == htslib::htsFormatCategory_variant_data)
         {
-            return Err(Error::BcfOpen {
+            return Err(BcfError::Open {
                 target: str::from_utf8(target).unwrap().to_owned(),
             });
         }
@@ -1219,7 +1275,7 @@ mod tests {
             .expect_err(
                 "This should fail since there are more alleles specified (4 for second sample) than max_ploidy (3) suggests",
             );
-        assert_eq!(err, crate::errors::Error::BcfSetValues);
+        assert_eq!(err, crate::bcf::BcfError::SetValues);
     }
 
     #[test]

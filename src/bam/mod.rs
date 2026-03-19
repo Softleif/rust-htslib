@@ -26,11 +26,88 @@ use std::sync::Arc;
 
 use url::Url;
 
-use crate::errors::{Error, Result};
 use crate::htslib;
 use crate::tpool::ThreadPool;
-use crate::utils::path_as_bytes;
 
+#[derive(thiserror::Error, Debug, PartialEq)]
+pub enum BamError {
+    #[error("file not found: {0:?}")]
+    FileNotFound(std::path::PathBuf),
+    #[error("non-unicode path: {0:?}")]
+    NonUnicodePath(std::path::PathBuf),
+    #[error("unable to open SAM/BAM/CRAM file at {target}")]
+    Open { target: String },
+    #[error("unable to open SAM/BAM/CRAM index for {target}; please create an index")]
+    InvalidIndex { target: String },
+    #[error("invalid record in SAM/BAM/CRAM file")]
+    InvalidRecord,
+    #[error("truncated record in SAM/BAM/CRAM file")]
+    TruncatedRecord,
+    #[error("failed to write BAM/CRAM record (out of disk space?)")]
+    WriteRecord,
+    #[error("format not indexable by htslib")]
+    NotIndexable,
+    #[error("failed to write BAM/CRAM index (out of disk space?)")]
+    WriteIndex,
+    #[error("failed to build BAM/CRAM index")]
+    BuildIndex,
+    #[error("failed to create SAM/BAM/CRAM pileup")]
+    Pileup,
+    #[error("file is not sorted by position")]
+    Unsorted,
+    #[error("invalid path to CRAM-reference {path}")]
+    InvalidReferencePath { path: std::path::PathBuf },
+    #[error("invalid compression level {level}")]
+    InvalidCompressionLevel { level: u32 },
+    #[error("error parsing CIGAR string: {msg}")]
+    ParseCigar { msg: String },
+    #[error("unexpected CIGAR operation: {msg}")]
+    UnexpectedCigarOperation { msg: String },
+    #[error("error parsing SAM record: {rec}")]
+    ParseSAM { rec: String },
+    #[error("failed to fetch region")]
+    Fetch,
+    #[error("error seeking to file offset")]
+    FileSeek,
+    #[error("error setting threads for file reading")]
+    SetThreads,
+    #[error("failed to create htslib thread pool")]
+    ThreadPool,
+    #[error("failed setting hts reading options")]
+    HtsSetOpt,
+    #[error("invalid tid {tid}")]
+    InvalidTid { tid: i32 },
+    #[error("failed calculating slow index statistics")]
+    SlowIdxStats,
+    #[error("no sequences in the reference")]
+    NoSequencesInReference,
+    #[error("failed to add aux field (out of memory?)")]
+    Aux,
+    #[error("provided string contains internal 0 byte(s)")]
+    AuxStringError,
+    #[error("failed to parse aux data")]
+    AuxParsingError,
+    #[error("the specified tag could not be found")]
+    AuxTagNotFound,
+    #[error("data type of aux field is not known")]
+    AuxUnknownType,
+    #[error("failed to add aux field, tag is already present")]
+    AuxTagAlreadyPresent,
+    #[error("updating the aux field for this datatype is not supported")]
+    AuxTagUpdatingNotSupported,
+    #[error("no base modification tag found for record")]
+    BaseModificationTagNotFound,
+    #[error("no base modification with the specified code found in record")]
+    BaseModificationTypeNotFound,
+    #[error("base modification iteration failed")]
+    BaseModificationIterationFailed,
+    #[error("base modification found too many modifications")]
+    BaseModificationTooManyMods,
+    #[error("sequence {sequence} not found")]
+    SequenceNotFound { sequence: String },
+}
+
+type Result<T> = std::result::Result<T, BamError>;
 pub use crate::bam::buffer::RecordBuffer;
 pub use crate::bam::header::Header;
 pub use crate::bam::record::Record;
@@ -38,6 +115,7 @@ pub use crate::bam::record::RecordView;
 use hts_sys::{hts_fmt_option, sam_fields};
 use std::convert::{TryFrom, TryInto};
 use std::mem::MaybeUninit;
+use BamError as Error;
 
 /// # Safety
 ///
@@ -77,11 +155,14 @@ pub unsafe fn set_fai_filename<P: AsRef<Path>>(
         fasta_path.as_ref().with_extension(".fai")
     };
     let p: &Path = path.as_ref();
-    let c_str = ffi::CString::new(p.to_str().unwrap().as_bytes()).unwrap();
+    let p_str = p
+        .to_str()
+        .ok_or_else(|| BamError::InvalidReferencePath { path: p.to_owned() })?;
+    let c_str = ffi::CString::new(p_str.as_bytes()).unwrap();
     if htslib::hts_set_fai_filename(htsfile, c_str.as_ptr()) == 0 {
         Ok(())
     } else {
-        Err(Error::BamInvalidReferencePath { path: p.to_owned() })
+        Err(BamError::InvalidReferencePath { path: p.to_owned() })
     }
 }
 
@@ -266,7 +347,14 @@ impl Reader {
     ///
     /// * `path` - the path to open.
     pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Self> {
-        Self::new(&path_as_bytes(path, true)?)
+        let path = path.as_ref();
+        if !path.exists() {
+            return Err(BamError::FileNotFound(path.to_owned()));
+        }
+        let p = path
+            .to_str()
+            .ok_or_else(|| BamError::NonUnicodePath(path.to_owned()))?;
+        Self::new(p.as_bytes())
     }
 
     /// Create a new Reader from STDIN.
@@ -289,7 +377,7 @@ impl Reader {
 
         let header = unsafe { htslib::sam_hdr_read(htsfile) };
         if header.is_null() {
-            return Err(Error::BamOpen {
+            return Err(BamError::Open {
                 target: String::from_utf8_lossy(path).to_string(),
             });
         }
@@ -386,8 +474,8 @@ impl Read for Reader {
             )
         } {
             -1 => None,
-            -2 => Some(Err(Error::BamTruncatedRecord)),
-            -4 => Some(Err(Error::BamInvalidRecord)),
+            -2 => Some(Err(Error::TruncatedRecord)),
+            -4 => Some(Err(Error::InvalidRecord)),
             _ => {
                 record.set_header(Arc::clone(&self.header));
 
@@ -627,14 +715,32 @@ impl IndexedReader {
     ///
     /// * `path` - the path to open.
     pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Self> {
-        Self::new(&path_as_bytes(path, true)?)
+        let path = path.as_ref();
+        if !path.exists() {
+            return Err(BamError::FileNotFound(path.to_owned()));
+        }
+        let p = path
+            .to_str()
+            .ok_or_else(|| BamError::NonUnicodePath(path.to_owned()))?;
+        Self::new(p.as_bytes())
     }
 
     pub fn from_path_and_index<P: AsRef<Path>>(path: P, index_path: P) -> Result<Self> {
-        Self::new_with_index_path(
-            &path_as_bytes(path, true)?,
-            &path_as_bytes(index_path, true)?,
-        )
+        let path = path.as_ref();
+        if !path.exists() {
+            return Err(BamError::FileNotFound(path.to_owned()));
+        }
+        let p = path
+            .to_str()
+            .ok_or_else(|| BamError::NonUnicodePath(path.to_owned()))?;
+        let index_path = index_path.as_ref();
+        if !index_path.exists() {
+            return Err(BamError::FileNotFound(index_path.to_owned()));
+        }
+        let ip = index_path
+            .to_str()
+            .ok_or_else(|| BamError::NonUnicodePath(index_path.to_owned()))?;
+        Self::new_with_index_path(p.as_bytes(), ip.as_bytes())
     }
 
     pub fn from_url(url: &Url) -> Result<Self> {
@@ -649,10 +755,12 @@ impl IndexedReader {
     fn new(path: &[u8]) -> Result<Self> {
         let htsfile = hts_open(path, b"r")?;
         let header = unsafe { htslib::sam_hdr_read(htsfile) };
-        let c_str = ffi::CString::new(path).unwrap();
+        let c_str = ffi::CString::new(path).map_err(|_| BamError::Open {
+            target: String::from_utf8_lossy(path).into_owned(),
+        })?;
         let idx = unsafe { htslib::sam_index_load(htsfile, c_str.as_ptr()) };
         if idx.is_null() {
-            Err(Error::BamInvalidIndex {
+            Err(BamError::InvalidIndex {
                 target: str::from_utf8(path).unwrap().to_owned(),
             })
         } else {
@@ -675,13 +783,17 @@ impl IndexedReader {
     fn new_with_index_path(path: &[u8], index_path: &[u8]) -> Result<Self> {
         let htsfile = hts_open(path, b"r")?;
         let header = unsafe { htslib::sam_hdr_read(htsfile) };
-        let c_str_path = ffi::CString::new(path).unwrap();
-        let c_str_index_path = ffi::CString::new(index_path).unwrap();
+        let c_str_path = ffi::CString::new(path).map_err(|_| BamError::Open {
+            target: String::from_utf8_lossy(path).into_owned(),
+        })?;
+        let c_str_index_path = ffi::CString::new(index_path).map_err(|_| BamError::Open {
+            target: String::from_utf8_lossy(index_path).into_owned(),
+        })?;
         let idx = unsafe {
             htslib::sam_index_load2(htsfile, c_str_path.as_ptr(), c_str_index_path.as_ptr())
         };
         if idx.is_null() {
-            Err(Error::BamInvalidIndex {
+            Err(BamError::InvalidIndex {
                 target: str::from_utf8(path).unwrap().to_owned(),
             })
         } else {
@@ -910,7 +1022,7 @@ impl IndexedReader {
 
             if tid != last_tid {
                 if (last_tid >= -1) && (counts[tid as usize][0] + counts[tid as usize][1]) > 0 {
-                    return Err(Error::BamUnsorted);
+                    return Err(Error::Unsorted);
                 }
                 last_tid = tid;
             }
@@ -1034,8 +1146,8 @@ impl Read for IndexedReader {
             Some(itr) => {
                 match itr_next(self.htsfile, itr, &mut record.inner as *mut htslib::bam1_t) {
                     -1 => None,
-                    -2 => Some(Err(Error::BamTruncatedRecord)),
-                    -4 => Some(Err(Error::BamInvalidRecord)),
+                    -2 => Some(Err(Error::TruncatedRecord)),
+                    -4 => Some(Err(Error::InvalidRecord)),
                     _ => {
                         record.set_header(Arc::clone(&self.header));
 
@@ -1139,7 +1251,11 @@ impl Writer {
         header: &header::Header,
         format: Format,
     ) -> Result<Self> {
-        Self::new(&path_as_bytes(path, false)?, format.write_mode(), header)
+        let path = path.as_ref();
+        let p = path
+            .to_str()
+            .ok_or_else(|| BamError::NonUnicodePath(path.to_owned()))?;
+        Self::new(p.as_bytes(), format.write_mode(), header)
     }
 
     /// Create a new SAM/BAM/CRAM file at STDOUT.
@@ -1264,7 +1380,7 @@ impl Writer {
             )
         } {
             0 => Ok(()),
-            _ => Err(Error::BamInvalidCompressionLevel { level }),
+            _ => Err(Error::InvalidCompressionLevel { level }),
         }
     }
 }
@@ -1291,7 +1407,7 @@ impl CompressionLevel {
             CompressionLevel::Fastest => Ok(1),
             CompressionLevel::Maximum => Ok(9),
             CompressionLevel::Level(i @ 0..=9) => Ok(i),
-            CompressionLevel::Level(i) => Err(Error::BamInvalidCompressionLevel { level: i }),
+            CompressionLevel::Level(i) => Err(Error::InvalidCompressionLevel { level: i }),
         }
     }
 }
@@ -1378,12 +1494,14 @@ impl<R: Read> Iterator for ChunkIterator<'_, R> {
 
 /// Wrapper for opening a BAM file.
 fn hts_open(path: &[u8], mode: &[u8]) -> Result<*mut htslib::htsFile> {
-    let cpath = ffi::CString::new(path).unwrap();
+    let cpath = ffi::CString::new(path).map_err(|_| BamError::Open {
+        target: String::from_utf8_lossy(path).into_owned(),
+    })?;
     let path = str::from_utf8(path).unwrap();
     let c_str = ffi::CString::new(mode).unwrap();
     let ret = unsafe { htslib::hts_open(cpath.as_ptr(), c_str.as_ptr()) };
     if ret.is_null() {
-        Err(Error::BamOpen {
+        Err(BamError::Open {
             target: path.to_owned(),
         })
     } else {
@@ -1395,7 +1513,7 @@ fn hts_open(path: &[u8], mode: &[u8]) -> Result<*mut htslib::htsFile> {
                     && (*ret).format.format != htslib::htsExactFormat_bam
                     && (*ret).format.format != htslib::htsExactFormat_cram
                 {
-                    return Err(Error::BamOpen {
+                    return Err(BamError::Open {
                         target: path.to_owned(),
                     });
                 }
@@ -1754,8 +1872,8 @@ CCCCCCCCCCCCCCCCCCC"[..],
             // fix qual offset
             let qual: Vec<u8> = quals[i].iter().map(|&q| q - 33).collect();
             assert_eq!(rec.qual(), &qual[..]);
-            assert_eq!(rec.aux(b"X"), Err(Error::BamAuxStringError));
-            assert_eq!(rec.aux(b"NotAvailableAux"), Err(Error::BamAuxTagNotFound));
+            assert_eq!(rec.aux(b"X"), Err(Error::AuxStringError));
+            assert_eq!(rec.aux(b"NotAvailableAux"), Err(Error::AuxTagNotFound));
         }
 
         // fetch to empty position
@@ -1805,7 +1923,7 @@ CCCCCCCCCCCCCCCCCCC"[..],
             // fix qual offset
             let qual: Vec<u8> = quals[i].iter().map(|&q| q - 33).collect();
             assert_eq!(rec.qual(), &qual[..]);
-            assert_eq!(rec.aux(b"NotAvailableAux"), Err(Error::BamAuxTagNotFound));
+            assert_eq!(rec.aux(b"NotAvailableAux"), Err(Error::AuxTagNotFound));
         }
 
         // fetch to empty position
@@ -2072,11 +2190,11 @@ CCCCCCCCCCCCCCCCCCC"[..],
                 rec.remove_aux(b"YT").unwrap();
             }
 
-            assert_eq!(rec.remove_aux(b"X"), Err(Error::BamAuxStringError));
-            assert_eq!(rec.remove_aux(b"ab"), Err(Error::BamAuxTagNotFound));
+            assert_eq!(rec.remove_aux(b"X"), Err(Error::AuxStringError));
+            assert_eq!(rec.remove_aux(b"ab"), Err(Error::AuxTagNotFound));
 
-            assert_eq!(rec.aux(b"XS"), Err(Error::BamAuxTagNotFound));
-            assert_eq!(rec.aux(b"YT"), Err(Error::BamAuxTagNotFound));
+            assert_eq!(rec.aux(b"XS"), Err(Error::AuxTagNotFound));
+            assert_eq!(rec.aux(b"YT"), Err(Error::AuxTagNotFound));
         }
     }
 

@@ -17,9 +17,10 @@ use std::sync::Arc;
 
 use byteorder::{LittleEndian, ReadBytesExt};
 
-use crate::bam::Error;
+use crate::bam::BamError as Error;
 use crate::bam::HeaderView;
-use crate::errors::Result;
+
+type Result<T> = std::result::Result<T, Error>;
 use crate::htslib;
 use crate::utils;
 #[cfg(feature = "serde_feature")]
@@ -85,7 +86,7 @@ impl PartialEq for Record {
 impl Eq for Record {}
 
 impl fmt::Debug for Record {
-    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt.write_fmt(format_args!(
             "Record(tid: {}, pos: {})",
             self.tid(),
@@ -177,7 +178,7 @@ impl Record {
         if succ == 0 {
             Ok(record)
         } else {
-            Err(Error::BamParseSAM {
+            Err(Error::ParseSAM {
                 rec: str::from_utf8(&sam_copy).unwrap().to_owned(),
             })
         }
@@ -668,7 +669,7 @@ impl Record {
     /// See [`Aux`] for more details.
     pub fn aux(&self, tag: &[u8]) -> Result<Aux<'_>> {
         if tag.len() < 2 {
-            return Err(Error::BamAuxStringError);
+            return Err(Error::AuxStringError);
         }
         let aux = unsafe {
             htslib::bam_aux_get(
@@ -705,7 +706,7 @@ impl Record {
         // `htslib` seems to allow this (for non-array values), which can lead to problems
         // since retrieving aux fields consumes &[u8; 2] and yields one field only.
         if self.aux(tag).is_ok() {
-            return Err(Error::BamAuxTagAlreadyPresent);
+            return Err(Error::AuxTagAlreadyPresent);
         }
         self.push_aux_unchecked(tag, value)
     }
@@ -783,7 +784,7 @@ impl Record {
                     [v].as_mut_ptr() as *mut u8,
                 ),
                 Aux::String(v) => {
-                    let c_str = ffi::CString::new(v).map_err(|_| Error::BamAuxStringError)?;
+                    let c_str = ffi::CString::new(v).map_err(|_| Error::AuxStringError)?;
                     htslib::bam_aux_append(
                         self.inner_ptr_mut(),
                         ctag,
@@ -793,7 +794,7 @@ impl Record {
                     )
                 }
                 Aux::HexByteArray(v) => {
-                    let c_str = ffi::CString::new(v).map_err(|_| Error::BamAuxStringError)?;
+                    let c_str = ffi::CString::new(v).map_err(|_| Error::AuxStringError)?;
                     htslib::bam_aux_append(
                         self.inner_ptr_mut(),
                         ctag,
@@ -919,7 +920,7 @@ impl Record {
         };
 
         if ret < 0 {
-            Err(Error::BamAux)
+            Err(Error::Aux)
         } else {
             Ok(())
         }
@@ -934,7 +935,7 @@ impl Record {
         let ctag = tag.as_ptr() as *mut c_char;
         let ret = unsafe {
             match value {
-                Aux::Char(_v) => return Err(Error::BamAuxTagUpdatingNotSupported),
+                Aux::Char(_v) => return Err(Error::AuxTagUpdatingNotSupported),
                 Aux::I8(v) => htslib::bam_aux_update_int(self.inner_ptr_mut(), ctag, v as i64),
                 Aux::U8(v) => htslib::bam_aux_update_int(self.inner_ptr_mut(), ctag, v as i64),
                 Aux::I16(v) => htslib::bam_aux_update_int(self.inner_ptr_mut(), ctag, v as i64),
@@ -947,7 +948,7 @@ impl Record {
                     htslib::bam_aux_update_float(self.inner_ptr_mut(), ctag, v as f32)
                 }
                 Aux::String(v) => {
-                    let c_str = ffi::CString::new(v).map_err(|_| Error::BamAuxStringError)?;
+                    let c_str = ffi::CString::new(v).map_err(|_| Error::AuxStringError)?;
                     htslib::bam_aux_update_str(
                         self.inner_ptr_mut(),
                         ctag,
@@ -955,7 +956,7 @@ impl Record {
                         c_str.as_ptr() as *const c_char,
                     )
                 }
-                Aux::HexByteArray(_v) => return Err(Error::BamAuxTagUpdatingNotSupported),
+                Aux::HexByteArray(_v) => return Err(Error::AuxTagUpdatingNotSupported),
                 // Not sure it's safe to cast an immutable slice to a mutable pointer in the following branches
                 Aux::ArrayI8(aux_array) => match aux_array {
                     AuxArray::TargetType(inner) => htslib::bam_aux_update_array(
@@ -1073,7 +1074,7 @@ impl Record {
         };
 
         if ret < 0 {
-            Err(Error::BamAux)
+            Err(Error::Aux)
         } else {
             Ok(())
         }
@@ -1082,7 +1083,7 @@ impl Record {
     // Delete auxiliary tag.
     pub fn remove_aux(&mut self, tag: &[u8]) -> Result<()> {
         if tag.len() < 2 {
-            return Err(Error::BamAuxStringError);
+            return Err(Error::AuxStringError);
         }
         let aux = unsafe {
             htslib::bam_aux_get(
@@ -1092,7 +1093,7 @@ impl Record {
         };
         unsafe {
             if aux.is_null() {
-                Err(Error::BamAuxTagNotFound)
+                Err(Error::AuxTagNotFound)
             } else {
                 htslib::bam_aux_del(self.inner_ptr_mut(), aux);
                 Ok(())
@@ -1620,7 +1621,7 @@ unsafe fn parse_aux_field<'a>(aux: *const u8) -> Result<(Aux<'a>, usize)> {
     const TYPE_ID_LEN: isize = 1;
 
     if aux.is_null() {
-        return Err(Error::BamAuxTagNotFound);
+        return Err(Error::AuxTagNotFound);
     }
 
     let (data, type_size) = match *aux {
@@ -1642,7 +1643,7 @@ unsafe fn parse_aux_field<'a>(aux: *const u8) -> Result<(Aux<'a>, usize)> {
                 Aux::I16(
                     slice::from_raw_parts(aux.offset(TYPE_ID_LEN), type_size)
                         .read_i16::<LittleEndian>()
-                        .map_err(|_| Error::BamAuxParsingError)?,
+                        .map_err(|_| Error::AuxParsingError)?,
                 ),
                 type_size,
             )
@@ -1653,7 +1654,7 @@ unsafe fn parse_aux_field<'a>(aux: *const u8) -> Result<(Aux<'a>, usize)> {
                 Aux::U16(
                     slice::from_raw_parts(aux.offset(TYPE_ID_LEN), type_size)
                         .read_u16::<LittleEndian>()
-                        .map_err(|_| Error::BamAuxParsingError)?,
+                        .map_err(|_| Error::AuxParsingError)?,
                 ),
                 type_size,
             )
@@ -1664,7 +1665,7 @@ unsafe fn parse_aux_field<'a>(aux: *const u8) -> Result<(Aux<'a>, usize)> {
                 Aux::I32(
                     slice::from_raw_parts(aux.offset(TYPE_ID_LEN), type_size)
                         .read_i32::<LittleEndian>()
-                        .map_err(|_| Error::BamAuxParsingError)?,
+                        .map_err(|_| Error::AuxParsingError)?,
                 ),
                 type_size,
             )
@@ -1675,7 +1676,7 @@ unsafe fn parse_aux_field<'a>(aux: *const u8) -> Result<(Aux<'a>, usize)> {
                 Aux::U32(
                     slice::from_raw_parts(aux.offset(TYPE_ID_LEN), type_size)
                         .read_u32::<LittleEndian>()
-                        .map_err(|_| Error::BamAuxParsingError)?,
+                        .map_err(|_| Error::AuxParsingError)?,
                 ),
                 type_size,
             )
@@ -1686,7 +1687,7 @@ unsafe fn parse_aux_field<'a>(aux: *const u8) -> Result<(Aux<'a>, usize)> {
                 Aux::Float(
                     slice::from_raw_parts(aux.offset(TYPE_ID_LEN), type_size)
                         .read_f32::<LittleEndian>()
-                        .map_err(|_| Error::BamAuxParsingError)?,
+                        .map_err(|_| Error::AuxParsingError)?,
                 ),
                 type_size,
             )
@@ -1697,14 +1698,14 @@ unsafe fn parse_aux_field<'a>(aux: *const u8) -> Result<(Aux<'a>, usize)> {
                 Aux::Double(
                     slice::from_raw_parts(aux.offset(TYPE_ID_LEN), type_size)
                         .read_f64::<LittleEndian>()
-                        .map_err(|_| Error::BamAuxParsingError)?,
+                        .map_err(|_| Error::AuxParsingError)?,
                 ),
                 type_size,
             )
         }
         b'Z' | b'H' => {
             let c_str = ffi::CStr::from_ptr(aux.offset(TYPE_ID_LEN).cast::<c_char>());
-            let rust_str = c_str.to_str().map_err(|_| Error::BamAuxParsingError)?;
+            let rust_str = c_str.to_str().map_err(|_| Error::AuxParsingError)?;
             (Aux::String(rust_str), c_str.to_bytes_with_nul().len())
         }
         b'B' => {
@@ -1716,7 +1717,7 @@ unsafe fn parse_aux_field<'a>(aux: *const u8) -> Result<(Aux<'a>, usize)> {
 
             let length = slice::from_raw_parts(aux.offset(TYPE_ID_LEN + ARRAY_INNER_TYPE_LEN), 4)
                 .read_u32::<LittleEndian>()
-                .map_err(|_| Error::BamAuxParsingError)? as usize;
+                .map_err(|_| Error::AuxParsingError)? as usize;
 
             // Return tuples of an `Aux` enum and the length of data + metadata in bytes
             let (array_data, array_size) = match *aux.offset(TYPE_ID_LEN) {
@@ -1770,7 +1771,7 @@ unsafe fn parse_aux_field<'a>(aux: *const u8) -> Result<(Aux<'a>, usize)> {
                     length * std::mem::size_of::<f32>(),
                 ),
                 _ => {
-                    return Err(Error::BamAuxUnknownType);
+                    return Err(Error::AuxUnknownType);
                 }
             };
             (
@@ -1780,7 +1781,7 @@ unsafe fn parse_aux_field<'a>(aux: *const u8) -> Result<(Aux<'a>, usize)> {
             )
         }
         _ => {
-            return Err(Error::BamAuxUnknownType);
+            return Err(Error::AuxUnknownType);
         }
     };
 
@@ -1815,7 +1816,7 @@ impl<'a> Iterator for AuxIter<'a> {
         if (1..=3).contains(&self.aux.len()) {
             // In the case of an error, we can not safely advance in the aux data, so we terminate the Iteration
             self.aux = &[];
-            return Some(Err(Error::BamAuxParsingError));
+            return Some(Err(Error::AuxParsingError));
         }
         let tag = &self.aux[..2];
         Some(unsafe {
@@ -2284,7 +2285,7 @@ impl<'a> RecordView<'a> {
     /// See [`Aux`] for more details.
     pub fn aux(&self, tag: &[u8]) -> Result<Aux<'a>> {
         if tag.len() < 2 {
-            return Err(Error::BamAuxStringError);
+            return Err(Error::AuxStringError);
         }
         let aux = unsafe {
             htslib::bam_aux_get(
@@ -2371,7 +2372,7 @@ impl Cigar {
 }
 
 impl fmt::Display for Cigar {
-    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt.write_fmt(format_args!("{}{}", self.len(), self.char()))
     }
 }
@@ -2551,15 +2552,15 @@ impl TryFrom<&[u8]> for CigarString {
             }
             // check that length is provided
             if i == j {
-                return Err(Error::BamParseCigar {
+                return Err(Error::ParseCigar {
                     msg: "Expected length before cigar operation [0-9]+[MIDNSHP=X]".to_owned(),
                 });
             }
             // get the length of the operation
-            let s = str::from_utf8(&bytes[i..j]).map_err(|_| Error::BamParseCigar {
+            let s = str::from_utf8(&bytes[i..j]).map_err(|_| Error::ParseCigar {
                 msg: format!("Invalid utf-8 bytes '{:?}'.", &bytes[i..j]),
             })?;
-            let n = s.parse().map_err(|_| Error::BamParseCigar {
+            let n = s.parse().map_err(|_| Error::ParseCigar {
                 msg: format!("Unable to parse &str '{:?}' to u32.", s),
             })?;
             // get the operation
@@ -2573,7 +2574,7 @@ impl TryFrom<&[u8]> for CigarString {
                     if i == 0 || j + 1 == text_len {
                         Cigar::HardClip(n)
                     } else {
-                        return Err(Error::BamParseCigar {
+                        return Err(Error::ParseCigar {
                             msg: "Hard clipping ('H') is only valid at the start or end of a cigar."
                                 .to_owned(),
                         });
@@ -2586,7 +2587,7 @@ impl TryFrom<&[u8]> for CigarString {
                         || bytes[j+1..].iter().all(|c| c.is_ascii_digit() || *c == b'H') {
                         Cigar::SoftClip(n)
                     } else {
-                        return Err(Error::BamParseCigar {
+                        return Err(Error::ParseCigar {
                         msg: "Soft clips ('S') can only have hard clips ('H') between them and the end of the CIGAR string."
                             .to_owned(),
                         });
@@ -2596,7 +2597,7 @@ impl TryFrom<&[u8]> for CigarString {
                 b'=' => Cigar::Equal(n),
                 b'X' => Cigar::Diff(n),
                 op => {
-                    return Err(Error::BamParseCigar {
+                    return Err(Error::ParseCigar {
                         msg: format!("Expected cigar operation [MIDNSHP=X] but got [{}]", op),
                     })
                 }
@@ -2633,7 +2634,7 @@ impl TryFrom<&str> for CigarString {
     fn try_from(text: &str) -> Result<Self> {
         let bytes = text.as_bytes();
         if !text.is_ascii() {
-            return Err(Error::BamParseCigar {
+            return Err(Error::ParseCigar {
                 msg: "CIGAR string contained non-ASCII characters, which are not valid. Valid are [0-9MIDNSHP=X].".to_owned(),
             });
         }
@@ -2651,7 +2652,7 @@ impl<'a> IntoIterator for &'a CigarString {
 }
 
 impl fmt::Display for CigarString {
-    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         for op in self.iter() {
             fmt.write_fmt(format_args!("{}{}", op.len(), op.char()))?;
         }
@@ -2788,12 +2789,12 @@ impl CigarStringView {
                     rpos += l;
                 },
                 Cigar::RefSkip(_) => {
-                    return Err(Error::BamUnexpectedCigarOperation {
+                    return Err(Error::UnexpectedCigarOperation {
                         msg: "'reference skip' (N) found before any operation describing read sequence".to_owned()
                     });
                 },
                 Cigar::HardClip(_) if i > 0 && i < self.len()-1 => {
-                    return Err(Error::BamUnexpectedCigarOperation{
+                    return Err(Error::UnexpectedCigarOperation{
                         msg: "'hard clip' (H) found in between operations, contradicting SAMv1 spec that hard clips can only be at the ends of reads".to_owned()
                     });
                 },
@@ -2850,7 +2851,7 @@ impl CigarStringView {
                     j += 1;
                 }
                 Cigar::HardClip(_) if j < self.len() - 1 => {
-                    return Err(Error::BamUnexpectedCigarOperation{
+                    return Err(Error::UnexpectedCigarOperation{
                         msg: "'hard clip' (H) found in between operations, contradicting SAMv1 spec that hard clips can only be at the ends of reads".to_owned()
                     });
                 }
@@ -2893,7 +2894,7 @@ impl<'a> IntoIterator for &'a CigarStringView {
 }
 
 impl fmt::Display for CigarStringView {
-    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.inner.fmt(fmt)
     }
 }
@@ -2936,7 +2937,7 @@ impl BaseModificationState<'_> {
         unsafe {
             let ret = hts_sys::bam_parse_basemod(bm.record.inner_ptr(), bm.state);
             if ret != 0 {
-                return Err(Error::BamBaseModificationTagNotFound);
+                return Err(Error::BaseModificationTagNotFound);
             }
         }
 
@@ -2956,14 +2957,14 @@ impl BaseModificationState<'_> {
             );
 
             if ret < 0 {
-                return Err(Error::BamBaseModificationIterationFailed);
+                return Err(Error::BaseModificationIterationFailed);
             }
 
             // the htslib API won't write more than buffer.capacity() mods to the output array but it will
             // return the actual number of modifications found. We return an error to the caller
             // in the case where there was insufficient storage to return all mods.
             if ret as usize > self.buffer.capacity() {
-                return Err(Error::BamBaseModificationTooManyMods);
+                return Err(Error::BaseModificationTooManyMods);
             }
 
             // we read the modifications directly into the vector, which does
@@ -3010,7 +3011,7 @@ impl BaseModificationState<'_> {
                 &mut canonical,
             );
             if ret == -1 {
-                Err(Error::BamBaseModificationTypeNotFound)
+                Err(Error::BaseModificationTypeNotFound)
             } else {
                 Ok(BaseModificationMetadata {
                     strand,
@@ -3516,7 +3517,7 @@ mod tests {
         // SAFETY: rec lives for the duration of this test.
         let view = unsafe { RecordView::from_raw(rec.inner_ptr()) };
 
-        assert!(matches!(view.aux(b"ZZ"), Err(Error::BamAuxTagNotFound)));
+        assert!(matches!(view.aux(b"ZZ"), Err(Error::AuxTagNotFound)));
     }
 
     #[test]
@@ -3525,7 +3526,7 @@ mod tests {
         // SAFETY: rec lives for the duration of this test.
         let view = unsafe { RecordView::from_raw(rec.inner_ptr()) };
 
-        assert!(matches!(view.aux(b"X"), Err(Error::BamAuxStringError)));
+        assert!(matches!(view.aux(b"X"), Err(Error::AuxStringError)));
     }
 
     #[test]
@@ -3712,7 +3713,7 @@ mod alignment_cigar_tests {
     #[test]
     pub fn test_cigar_parsing_non_ascii_error() {
         let cigar_str = "43ጷ";
-        let expected_error = Err(Error::BamParseCigar {
+        let expected_error = Err(Error::ParseCigar {
                 msg: "CIGAR string contained non-ASCII characters, which are not valid. Valid are [0-9MIDNSHP=X].".to_owned(),
             });
 

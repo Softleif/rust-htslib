@@ -21,8 +21,9 @@ use ieee754::Ieee754;
 use lazy_static::lazy_static;
 
 use crate::bcf::header::{HeaderView, Id};
-use crate::bcf::Error;
-use crate::errors::Result;
+use crate::bcf::BcfError as Error;
+
+type Result<T> = std::result::Result<T, Error>;
 use crate::htslib;
 
 const MISSING_INTEGER: i32 = i32::MIN;
@@ -87,8 +88,8 @@ pub trait FilterId {
 
 impl FilterId for [u8] {
     fn id_from_header(&self, header: &HeaderView) -> Result<Id> {
-        let id = CString8::new(std::str::from_utf8(self).map_err(|_| Error::BcfInvalidRecord)?)
-            .map_err(|_| Error::BcfInvalidRecord)?;
+        let id = CString8::new(std::str::from_utf8(self).map_err(|_| Error::InvalidRecord)?)
+            .map_err(|_| Error::InvalidRecord)?;
         header.name_to_id(&id)
     }
     fn is_pass(&self) -> bool {
@@ -220,7 +221,7 @@ impl Record {
             self.set_header(Arc::clone(dst_header));
             Ok(())
         } else {
-            Err(Error::BcfTranslate)
+            Err(Error::Translate)
         }
     }
 
@@ -354,7 +355,7 @@ impl Record {
         {
             Ok(())
         } else {
-            Err(Error::BcfSetValues)
+            Err(Error::SetValues)
         }
     }
 
@@ -371,7 +372,7 @@ impl Record {
         {
             Ok(())
         } else {
-            Err(Error::BcfSetValues)
+            Err(Error::SetValues)
         }
     }
 
@@ -388,7 +389,7 @@ impl Record {
         {
             Ok(())
         } else {
-            Err(Error::BcfSetValues)
+            Err(Error::SetValues)
         }
     }
 
@@ -473,7 +474,7 @@ impl Record {
     /// ```
     ///
     /// # Errors
-    /// If any of the filter IDs do not exist in the header, an [`Error::BcfUnknownID`] is returned.
+    /// If any of the filter IDs do not exist in the header, an [`BcfError::UnknownID`] is returned.
     ///
     pub fn set_filters<T: FilterId + ?Sized>(&mut self, flt_ids: &[&T]) -> Result<()> {
         let mut ids: Vec<i32> = flt_ids
@@ -521,7 +522,7 @@ impl Record {
     /// ```
     ///
     /// # Errors
-    /// If the `flt_id` does not exist in the header, an [`Error::BcfUnknownID`] is returned.
+    /// If the `flt_id` does not exist in the header, an [`BcfError::UnknownID`] is returned.
     ///
     pub fn push_filter<T: FilterId + ?Sized>(&mut self, flt_id: &T) -> Result<()> {
         let id = flt_id.id_from_header(self.header())?;
@@ -567,7 +568,7 @@ impl Record {
     /// ```
     ///
     /// # Errors
-    /// If the `flt_id` does not exist in the header, an [`Error::BcfUnknownID`] is returned.
+    /// If the `flt_id` does not exist in the header, an [`BcfError::UnknownID`] is returned.
     ///
     pub fn remove_filter<T: FilterId + ?Sized>(
         &mut self,
@@ -639,7 +640,7 @@ impl Record {
         {
             Ok(())
         } else {
-            Err(Error::BcfSetValues)
+            Err(Error::SetValues)
         }
     }
 
@@ -760,7 +761,7 @@ impl Record {
     /// assert_eq!("1/1", &format!("{}", gts.get(0)));
     /// assert_eq!("0|1", &format!("{}", gts.get(1)));
     /// assert_eq!("0", &format!("{}", gts.get(2)));
-    /// # Ok::<(), rust_htslib::errors::Error>(())
+    /// # Ok::<(), rust_htslib::bcf::BcfError>(())
     /// ```
     pub fn push_genotype_structured<GT>(
         &mut self,
@@ -773,7 +774,7 @@ impl Record {
         let mut data = Vec::with_capacity(max_ploidy * genotypes.len());
         for gt in genotypes {
             if gt.as_ref().len() > max_ploidy {
-                return Err(Error::BcfSetValues);
+                return Err(Error::SetValues);
             }
             data.extend(
                 gt.as_ref()
@@ -945,7 +946,7 @@ impl Record {
             {
                 Ok(())
             } else {
-                Err(Error::BcfSetTag { tag: tag.into() })
+                Err(Error::SetTag { tag: tag.into() })
             }
         }
     }
@@ -988,7 +989,7 @@ impl Record {
             {
                 Ok(())
             } else {
-                Err(Error::BcfSetTag { tag: tag.into() })
+                Err(Error::SetTag { tag: tag.into() })
             }
         }
     }
@@ -1032,7 +1033,7 @@ impl Record {
             {
                 Ok(())
             } else {
-                Err(Error::BcfSetTag { tag: tag.into() })
+                Err(Error::SetTag { tag: tag.into() })
             }
         }
     }
@@ -1081,7 +1082,7 @@ impl Record {
             {
                 Ok(())
             } else {
-                Err(Error::BcfSetTag { tag: tag.into() })
+                Err(Error::SetTag { tag: tag.into() })
             }
         }
     }
@@ -1138,7 +1139,7 @@ impl Record {
             {
                 Ok(())
             } else {
-                Err(Error::BcfSetTag { tag: tag.into() })
+                Err(Error::SetTag { tag: tag.into() })
             }
         }
     }
@@ -1146,7 +1147,7 @@ impl Record {
     /// Remove unused alleles.
     pub fn trim_alleles(&mut self) -> Result<()> {
         match unsafe { htslib::bcf_trim_alleles(self.header().inner, self.inner) } {
-            -1 => Err(Error::BcfRemoveAlleles),
+            -1 => Err(Error::RemoveAlleles),
             _ => Ok(()),
         }
     }
@@ -1169,7 +1170,7 @@ impl Record {
         }
 
         match ret {
-            -1 => Err(Error::BcfRemoveAlleles),
+            -1 => Err(Error::RemoveAlleles),
             _ => Ok(()),
         }
     }
@@ -1251,7 +1252,7 @@ impl Record {
                     libc::free(buf.s as *mut libc::c_void);
                 }
             }
-            return Err(Error::BcfToString);
+            return Err(Error::ToString);
         }
 
         let vcf_str = unsafe {
@@ -1447,8 +1448,8 @@ impl<'b, B: BorrowMut<Buffer> + Borrow<Buffer> + 'b> Info<'_, B> {
         self.buffer.borrow_mut().len = n;
 
         match ret {
-            -1 => Err(Error::BcfUndefinedTag { tag: self.desc() }),
-            -2 => Err(Error::BcfUnexpectedType { tag: self.desc() }),
+            -1 => Err(Error::UndefinedTag { tag: self.desc() }),
+            -2 => Err(Error::UnexpectedType { tag: self.desc() }),
             -3 => Ok(None),
             ret => Ok(Some(ret)),
         }
@@ -1599,9 +1600,9 @@ impl<'a, 'b, B: BorrowMut<Buffer> + Borrow<Buffer> + 'b> Format<'a, B> {
         };
         self.buffer.borrow_mut().len = n;
         match ret {
-            -1 => Err(Error::BcfUndefinedTag { tag: self.desc() }),
-            -2 => Err(Error::BcfUnexpectedType { tag: self.desc() }),
-            -3 => Err(Error::BcfMissingTag {
+            -1 => Err(Error::UndefinedTag { tag: self.desc() }),
+            -2 => Err(Error::UnexpectedType { tag: self.desc() }),
+            -3 => Err(Error::MissingTag {
                 tag: self.desc(),
                 record: self.record.desc(),
             }),

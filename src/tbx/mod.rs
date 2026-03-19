@@ -42,13 +42,49 @@
 //! ```
 
 use std::ffi;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::ptr;
 use url::Url;
 
-use crate::errors::{Error, Result};
 use crate::htslib;
-use crate::utils::path_as_bytes;
+
+#[derive(thiserror::Error, Debug, PartialEq)]
+pub enum TbxError {
+    #[error("file not found: {0:?}")]
+    FileNotFound(PathBuf),
+    #[error("non-unicode path: {0:?}")]
+    NonUnicodePath(PathBuf),
+    #[error("path or sequence name contains interior null byte")]
+    NullByte,
+    #[error("file is not BGZF-compressed: {0:?}")]
+    NotBgzf(PathBuf),
+    #[error("invalid or missing tabix index for {0:?}")]
+    InvalidIndex(PathBuf),
+    #[error("failed to build tabix index for {0:?}")]
+    BuildIndexFailed(PathBuf),
+    #[error("sequence {name} not found in index")]
+    SequenceNotFound { name: String },
+    #[error("failed to fetch region")]
+    Fetch,
+    #[error("no active iterator — call fetch() first")]
+    NoIter,
+    #[error("truncated tabix record")]
+    TruncatedRecord,
+    #[error("error setting threads for tabix file reading")]
+    SetThreads,
+}
+
+type Result<T> = std::result::Result<T, TbxError>;
+
+fn path_to_cstring(path: &Path, must_exist: bool) -> Result<ffi::CString> {
+    if must_exist && !path.exists() {
+        return Err(TbxError::FileNotFound(path.to_owned()));
+    }
+    let s = path
+        .to_str()
+        .ok_or_else(|| TbxError::NonUnicodePath(path.to_owned()))?;
+    ffi::CString::new(s).map_err(|_| TbxError::NullByte)
+}
 
 /// Preset configurations for common file formats.
 #[derive(Debug, Clone, Copy)]
@@ -83,8 +119,8 @@ impl TabixFormat {
 /// * `format` - the file format preset (determines which columns are chrom/start/end)
 /// * `n_threads` - number of threads for decompression (0 for single-threaded)
 pub fn build_index<P: AsRef<Path>>(path: P, format: TabixFormat, n_threads: u32) -> Result<()> {
-    let path_bytes = path_as_bytes(path, true)?;
-    let c_path = ffi::CString::new(path_bytes).map_err(|_| Error::NonUnicodePath)?;
+    let path = path.as_ref();
+    let c_path = path_to_cstring(path, true)?;
 
     let ret = unsafe {
         htslib::tbx_index_build3(
@@ -98,8 +134,8 @@ pub fn build_index<P: AsRef<Path>>(path: P, format: TabixFormat, n_threads: u32)
 
     match ret {
         0 => Ok(()),
-        -2 => Err(Error::TabixNotBgzf),
-        _ => Err(Error::TabixBuildIndex),
+        -2 => Err(TbxError::NotBgzf(path.to_owned())),
+        _ => Err(TbxError::BuildIndexFailed(path.to_owned())),
     }
 }
 
@@ -167,35 +203,35 @@ const KS_SEP_LINE: i32 = 2;
 
 impl Reader {
     /// Create a new Reader from path.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - the path to open.
     pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Self> {
-        Self::new(&path_as_bytes(path, true)?)
+        let path = path.as_ref();
+        let c_path = path_to_cstring(path, true)?;
+        Self::new_from_cstring(c_path)
     }
 
     pub fn from_url(url: &Url) -> Result<Self> {
-        Self::new(url.as_str().as_bytes())
+        let c_path = ffi::CString::new(url.as_str()).map_err(|_| TbxError::NullByte)?;
+        Self::new_from_cstring(c_path)
     }
 
-    /// Create a new Reader.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - the path.
-    fn new(path: &[u8]) -> Result<Self> {
-        let path = ffi::CString::new(path).unwrap();
-        let c_str = ffi::CString::new("r").unwrap();
-        let hts_file = unsafe { htslib::hts_open(path.as_ptr(), c_str.as_ptr()) };
+    fn new_from_cstring(c_path: ffi::CString) -> Result<Self> {
+        let c_mode = ffi::CString::new("r").unwrap(); // safe: literal
+        let hts_file = unsafe { htslib::hts_open(c_path.as_ptr(), c_mode.as_ptr()) };
+        if hts_file.is_null() {
+            return Err(TbxError::InvalidIndex(PathBuf::from(
+                c_path.to_string_lossy().as_ref(),
+            )));
+        }
         let hts_format: u32 = unsafe {
             let file_format: *const hts_sys::htsFormat = htslib::hts_get_format(hts_file);
             (*file_format).format
         };
 
-        let tbx = unsafe { htslib::tbx_index_load(path.as_ptr()) };
+        let tbx = unsafe { htslib::tbx_index_load(c_path.as_ptr()) };
         if tbx.is_null() {
-            return Err(Error::TabixInvalidIndex);
+            return Err(TbxError::InvalidIndex(PathBuf::from(
+                c_path.to_string_lossy().as_ref(),
+            )));
         }
         let mut header = Vec::new();
         let mut buf = htslib::kstring_t {
@@ -228,11 +264,11 @@ impl Reader {
 
     /// Get sequence/target ID from sequence name.
     pub fn tid(&self, name: &str) -> Result<u64> {
-        let name_cstr = ffi::CString::new(name.as_bytes()).unwrap();
+        let name_cstr = ffi::CString::new(name.as_bytes()).map_err(|_| TbxError::NullByte)?;
         let res = unsafe { htslib::tbx_name2id(self.tbx, name_cstr.as_ptr()) };
         if res < 0 {
-            Err(Error::UnknownSequence {
-                sequence: name.to_owned(),
+            Err(TbxError::SequenceNotFound {
+                name: name.to_owned(),
             })
         } else {
             Ok(res as u64)
@@ -261,7 +297,7 @@ impl Reader {
         };
         if itr.is_null() {
             self.itr = None;
-            Err(Error::Fetch)
+            Err(TbxError::Fetch)
         } else {
             self.itr = Some(itr);
             Ok(())
@@ -301,7 +337,7 @@ impl Reader {
 
         let r = unsafe { htslib::hts_set_threads(self.hts_file, n_threads as i32) };
         if r != 0 {
-            Err(Error::SetThreads)
+            Err(TbxError::SetThreads)
         } else {
             Ok(())
         }
@@ -327,9 +363,7 @@ impl Read for Reader {
                         htslib::hts_itr_next(
                             htslib::hts_get_bgzfp(self.hts_file),
                             itr,
-                            //mem::transmute(&mut self.buf),
                             &mut self.buf as *mut htslib::kstring_t as *mut libc::c_void,
-                            //mem::transmute(self.tbx),
                             self.tbx as *mut libc::c_void,
                         )
                     };
@@ -337,7 +371,7 @@ impl Read for Reader {
                     if ret == -1 {
                         return Ok(false);
                     } else if ret == -2 {
-                        return Err(Error::TabixTruncatedRecord);
+                        return Err(TbxError::TruncatedRecord);
                     } else if ret < 0 {
                         panic!("Return value should not be <0 but was: {}", ret);
                     }
@@ -353,7 +387,7 @@ impl Read for Reader {
                     }
                 }
             }
-            _ => Err(Error::TabixNoIter),
+            _ => Err(TbxError::NoIter),
         }
     }
 

@@ -9,6 +9,7 @@ use std::str;
 use std::sync::Arc;
 
 use crate::bam;
+use crate::bam::BamError;
 use crate::bam::Read;
 use crate::errors::{Error, Result};
 /// A buffer for BAM records. This allows access regions in a sorted BAM file while iterating
@@ -151,9 +152,9 @@ impl RecordBuffer {
 
             Ok((added, deleted))
         } else {
-            Err(Error::UnknownSequence {
+            Err(Error::from(BamError::SequenceNotFound {
                 sequence: str::from_utf8(chrom).unwrap().to_owned(),
-            })
+            }))
         }
     }
 

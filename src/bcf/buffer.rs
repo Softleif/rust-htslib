@@ -7,8 +7,9 @@ use std::cmp::Ordering;
 use std::collections::{vec_deque, VecDeque};
 use std::mem;
 
-use crate::bcf::{self, Read};
-use crate::errors::Result;
+use crate::bcf::{self, BcfError, Read};
+
+type Result<T> = std::result::Result<T, BcfError>;
 
 /// A buffer for BCF records. This allows access regions in a sorted BCF file while iterating
 /// over it in a single pass.

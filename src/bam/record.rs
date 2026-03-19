@@ -2472,14 +2472,19 @@ pub struct CigarString(pub Arc<[Cigar]>);
 
 #[cfg(feature = "serde_feature")]
 impl Serialize for CigarString {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
         self.0.as_ref().serialize(serializer)
     }
 }
 
 #[cfg(feature = "serde_feature")]
 impl<'de> Deserialize<'de> for CigarString {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
         let v = Vec::<Cigar>::deserialize(deserializer)?;
         Ok(CigarString::from(v))
     }

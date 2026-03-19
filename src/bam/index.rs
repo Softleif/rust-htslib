@@ -41,6 +41,7 @@ pub fn build<P: AsRef<Path>>(
     } else {
         ptr::null()
     };
+    // SAFETY: bam_path CString is valid; idx_path_ptr is either a valid CString or null. Return checked below.
     let ret = unsafe {
         htslib::sam_index_build3(
             utils::path_to_cstring(&bam_path).unwrap().as_ptr(),

@@ -17,6 +17,7 @@ pub struct ThreadPool {
 impl ThreadPool {
     /// Create a new thread pool with `n_threads` threads.
     pub fn new(n_threads: u32) -> Result<ThreadPool> {
+        // SAFETY: n_threads converted from u32; result is null-checked below.
         let ret = unsafe { htslib::hts_tpool_init(n_threads as i32) };
 
         if ret.is_null() {
@@ -45,6 +46,8 @@ pub struct InnerThreadPool {
 impl Drop for InnerThreadPool {
     fn drop(&mut self) {
         if !self.inner.pool.is_null() {
+            // SAFETY: pool is non-null (checked above) and was allocated by
+            // hts_tpool_init. Nulled below to prevent double-free.
             unsafe {
                 htslib::hts_tpool_destroy(self.inner.pool);
             }

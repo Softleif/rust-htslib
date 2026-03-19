@@ -97,6 +97,8 @@ pub enum TabixFormat {
 
 impl TabixFormat {
     fn conf_ptr(self) -> *const htslib::tbx_conf_t {
+        // SAFETY: tbx_conf_* are static constants in htslib; taking their
+        // address is safe (the unsafe block is overly broad but harmless).
         unsafe {
             match self {
                 TabixFormat::Bed => &htslib::tbx_conf_bed,
@@ -122,6 +124,7 @@ pub fn build_index<P: AsRef<Path>>(path: P, format: TabixFormat, n_threads: u32)
     let path = path.as_ref();
     let c_path = path_to_cstring(path, true)?;
 
+    // SAFETY: c_path is a valid null-terminated CString; return checked below.
     let ret = unsafe {
         htslib::tbx_index_build3(
             c_path.as_ptr(),
@@ -196,6 +199,8 @@ pub struct Reader {
     end: i64,
 }
 
+// SAFETY: Reader owns its htsFile and tbx_t exclusively; htslib tabix
+// operations are not tied to a particular thread.
 unsafe impl Send for Reader {}
 
 /// Redefinition of `KS_SEP_LINE` from `htslib/kseq.h`.
@@ -216,17 +221,21 @@ impl Reader {
 
     fn new_from_cstring(c_path: ffi::CString) -> Result<Self> {
         let c_mode = ffi::CString::new("r").unwrap(); // safe: literal
+                                                      // SAFETY: c_path and c_mode are valid CStrings; result is null-checked.
         let hts_file = unsafe { htslib::hts_open(c_path.as_ptr(), c_mode.as_ptr()) };
         if hts_file.is_null() {
             return Err(TbxError::InvalidIndex(PathBuf::from(
                 c_path.to_string_lossy().as_ref(),
             )));
         }
+        // SAFETY: hts_file is non-null (checked above); hts_get_format returns
+        // a pointer to htslib's internal format struct; reading .format is safe.
         let hts_format: u32 = unsafe {
             let file_format: *const hts_sys::htsFormat = htslib::hts_get_format(hts_file);
             (*file_format).format
         };
 
+        // SAFETY: c_path is a valid CString; result is null-checked.
         let tbx = unsafe { htslib::tbx_index_load(c_path.as_ptr()) };
         if tbx.is_null() {
             return Err(TbxError::InvalidIndex(PathBuf::from(
@@ -239,6 +248,11 @@ impl Reader {
             m: 0,
             s: ptr::null_mut(),
         };
+        // SAFETY: hts_file and tbx are non-null (checked above). hts_getline
+        // fills buf.s; buf.l > 0 implies buf.s is non-null and points to a
+        // valid C string. (*tbx).conf.meta_char is safe because tbx is valid.
+        // FIXME: .unwrap() on .to_str() will panic if the header line contains
+        // invalid UTF-8; should handle this gracefully.
         unsafe {
             while htslib::hts_getline(hts_file, KS_SEP_LINE, &mut buf) >= 0 {
                 if buf.l > 0 && i32::from(*buf.s) == (*tbx).conf.meta_char {
@@ -265,6 +279,7 @@ impl Reader {
     /// Get sequence/target ID from sequence name.
     pub fn tid(&self, name: &str) -> Result<u64> {
         let name_cstr = ffi::CString::new(name.as_bytes()).map_err(|_| TbxError::NullByte)?;
+        // SAFETY: self.tbx is non-null (from constructor); name_cstr is valid.
         let res = unsafe { htslib::tbx_name2id(self.tbx, name_cstr.as_ptr()) };
         if res < 0 {
             Err(TbxError::SequenceNotFound {
@@ -282,10 +297,12 @@ impl Reader {
         self.end = end as i64;
 
         if let Some(itr) = self.itr {
+            // SAFETY: itr is non-null (checked via Some).
             unsafe {
                 htslib::hts_itr_destroy(itr);
             }
         }
+        // SAFETY: self.tbx is non-null; (*self.tbx).idx is valid; result null-checked.
         let itr = unsafe {
             htslib::hts_itr_query(
                 (*self.tbx).idx,
@@ -309,6 +326,10 @@ impl Reader {
         let mut result = Vec::new();
 
         let mut nseq: i32 = 0;
+        // SAFETY: self.tbx is non-null. tbx_seqnames returns an array of nseq
+        // pointers. If nseq == 0 the loop body never runs, so a null seqs is
+        // harmless (only freed below, and libc::free(null) is a no-op).
+        // FIXME: .unwrap() on .to_str() will panic on non-UTF-8 sequence names.
         let seqs = unsafe { htslib::tbx_seqnames(self.tbx, &mut nseq) };
         for i in 0..nseq {
             unsafe {
@@ -319,6 +340,7 @@ impl Reader {
                 ));
             }
         }
+        // SAFETY: seqs was allocated by htslib; freed exactly once.
         unsafe {
             libc::free(seqs as *mut libc::c_void);
         };
@@ -335,6 +357,7 @@ impl Reader {
     pub fn set_threads(&mut self, n_threads: usize) -> Result<()> {
         assert!(n_threads > 0, "n_threads must be > 0");
 
+        // SAFETY: self.hts_file is non-null; n_threads validated > 0.
         let r = unsafe { htslib::hts_set_threads(self.hts_file, n_threads as i32) };
         if r != 0 {
             Err(TbxError::SetThreads)
@@ -359,6 +382,8 @@ impl Read for Reader {
             Some(itr) => {
                 loop {
                     // Try to read next line.
+                    // SAFETY: all pointers non-null (hts_file from constructor,
+                    // itr from Some, buf is &mut, tbx from constructor). Return checked.
                     let ret = unsafe {
                         htslib::hts_itr_next(
                             htslib::hts_get_bgzfp(self.hts_file),
@@ -377,10 +402,14 @@ impl Read for Reader {
                     }
                     // Return first overlapping record (loop will stop when `hts_itr_next(...)`
                     // returns `< 0`).
+                    // SAFETY: itr is non-null (checked via Some); reading struct fields.
                     let (tid, start, end) =
                         unsafe { ((*itr).curr_tid, (*itr).curr_beg, (*itr).curr_end) };
                     // XXX: Careful with this tid conversion!!!
                     if overlap(self.tid, self.start, self.end, tid as i64, start, end) {
+                        // SAFETY: hts_itr_next returned >= 0, so buf.s is non-null
+                        // and contains a valid C string.
+                        // FIXME: .unwrap() on .to_str() will panic on non-UTF-8 data.
                         *record =
                             unsafe { Vec::from(ffi::CStr::from_ptr(self.buf.s).to_str().unwrap()) };
                         return Ok(true);
@@ -402,6 +431,8 @@ impl Read for Reader {
 
 impl Drop for Reader {
     fn drop(&mut self) {
+        // SAFETY: all pointers were allocated by htslib during construction;
+        // itr checked via Some; destroy/close are symmetric with open/load.
         unsafe {
             if let Some(itr) = self.itr {
                 htslib::hts_itr_destroy(itr);

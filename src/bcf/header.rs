@@ -72,7 +72,9 @@ pub struct Header {
     pub subset: Option<SampleSubset>,
 }
 
+// SAFETY: Header owns its inner pointer exclusively; no shared mutable state.
 unsafe impl Send for Header {}
+// SAFETY: Header owns its inner pointer exclusively; no shared mutable state.
 unsafe impl Sync for Header {}
 
 impl Default for Header {
@@ -86,6 +88,7 @@ impl Header {
     pub fn new() -> Self {
         let c_str = ffi::CString::new(&b"w"[..]).unwrap();
         Header {
+            // SAFETY: c_str is a valid NUL-terminated string; bcf_hdr_init returns a valid pointer.
             inner: unsafe { htslib::bcf_hdr_init(c_str.as_ptr()) },
             subset: None,
         }
@@ -109,6 +112,7 @@ impl Header {
     /// - `header` - The `HeaderView` to use as the template.
     pub fn from_template(header: &HeaderView) -> Self {
         Header {
+            // SAFETY: header.inner is a valid bcf_hdr_t pointer; bcf_hdr_dup returns a new copy.
             inner: unsafe { htslib::bcf_hdr_dup(header.inner) },
             subset: None,
         }
@@ -130,6 +134,7 @@ impl Header {
         let name_pointers: Vec<_> = names.iter().map(|s| s.as_ptr() as *mut i8).collect();
         #[allow(clippy::unnecessary_cast)]
         let name_pointers_ptr = name_pointers.as_ptr() as *const *mut c_char;
+        // SAFETY: header.inner is valid; name_pointers and imap are correctly sized.
         let inner = unsafe {
             htslib::bcf_hdr_subset(
                 header.inner,
@@ -155,6 +160,7 @@ impl Header {
     /// - `sample` - Name of the sample to add (to the end of the sample list).
     pub fn push_sample(&mut self, sample: &[u8]) -> &mut Self {
         let c_str = ffi::CString::new(sample).unwrap();
+        // SAFETY: self.inner is non-null (from constructor); c_str is a valid CString.
         unsafe { htslib::bcf_hdr_add_sample(self.inner, c_str.as_ptr()) };
         self
     }
@@ -172,6 +178,7 @@ impl Header {
     /// ```
     pub fn push_record(&mut self, record: &[u8]) -> &mut Self {
         let c_str = ffi::CString::new(record).unwrap();
+        // SAFETY: self.inner is non-null (from constructor); c_str is a valid CString.
         unsafe { htslib::bcf_hdr_append(self.inner, c_str.as_ptr()) };
         self
     }
@@ -232,6 +239,7 @@ impl Header {
 
     /// Implementation of removing header tags.
     fn remove_impl(&mut self, tag: &[u8], type_: u32) -> &mut Self {
+        // SAFETY: self.inner is non-null (from constructor); c_str is a valid CString.
         unsafe {
             let v = tag.to_vec();
             let c_str = ffi::CString::new(v).unwrap();
@@ -243,6 +251,7 @@ impl Header {
 
 impl Drop for Header {
     fn drop(&mut self) {
+        // SAFETY: self.inner was allocated by bcf_hdr_init or bcf_hdr_dup; bcf_hdr_destroy is symmetric.
         unsafe { htslib::bcf_hdr_destroy(self.inner) };
     }
 }
@@ -284,7 +293,9 @@ pub struct HeaderView {
     pub(crate) inner: *mut htslib::bcf_hdr_t,
 }
 
+// SAFETY: HeaderView owns its inner pointer exclusively; no shared mutable state.
 unsafe impl Send for HeaderView {}
+// SAFETY: HeaderView owns its inner pointer exclusively; no shared mutable state.
 unsafe impl Sync for HeaderView {}
 
 impl HeaderView {
@@ -307,6 +318,7 @@ impl HeaderView {
 
     #[inline]
     fn inner(&self) -> htslib::bcf_hdr_t {
+        // SAFETY: self.inner is non-null, initialized by constructor or from_ptr.
         unsafe { *self.inner }
     }
 
@@ -317,10 +329,12 @@ impl HeaderView {
 
     /// Get vector of sample names defined in the header.
     pub fn samples(&self) -> Vec<&[u8]> {
+        // SAFETY: inner().samples is a valid pointer to sample_count() C strings, set by htslib.
         let names =
             unsafe { slice::from_raw_parts(self.inner().samples, self.sample_count() as usize) };
         names
             .iter()
+            // SAFETY: each element is a non-null, NUL-terminated C string from htslib.
             .map(|name| unsafe { ffi::CStr::from_ptr(*name).to_bytes() })
             .collect()
     }
@@ -338,6 +352,7 @@ impl HeaderView {
 
     pub fn rid2name(&self, rid: u32) -> Result<&[u8]> {
         if rid < self.contig_count() {
+            // SAFETY: rid is bounds-checked above; dict entries and their keys are valid htslib pointers.
             unsafe {
                 let dict = self.inner().id[htslib::BCF_DT_CTG as usize];
                 let ptr = (*dict.offset(rid as isize)).key;
@@ -369,6 +384,7 @@ impl HeaderView {
     /// If `name` does not match a chromosome currently in the VCF header, returns [`BcfError::UnknownContig`]
     pub fn name2rid(&self, name: &[u8]) -> Result<u32> {
         let c_str = ffi::CString::new(name).unwrap();
+        // SAFETY: self.inner is non-null (from constructor); c_str is a valid CString.
         unsafe {
             match htslib::bcf_hdr_id2int(
                 self.inner,
@@ -394,6 +410,7 @@ impl HeaderView {
     fn tag_type(&self, tag: &[u8], hdr_type: ::libc::c_uint) -> Result<(TagType, TagLength)> {
         let tag_desc = || str::from_utf8(tag).unwrap().to_owned();
         let c_str_tag = ffi::CString::new(tag).unwrap();
+        // SAFETY: self.inner is non-null; id is bounds-checked; entry/val pointers are valid htslib internals.
         let (_type, length, num_values) = unsafe {
             let id = htslib::bcf_hdr_id2int(
                 self.inner,
@@ -430,6 +447,7 @@ impl HeaderView {
 
     /// Convert string ID (e.g., for a `FILTER` value) to its numeric identifier.
     pub fn name_to_id(&self, id: &CStr8) -> Result<Id> {
+        // SAFETY: self.inner is non-null (from constructor); id is a valid NUL-terminated CStr8.
         unsafe {
             match htslib::bcf_hdr_id2int(
                 self.inner,
@@ -446,12 +464,14 @@ impl HeaderView {
     /// name.
     ///
     pub fn id_to_name(&self, id: Id) -> Result<Vec<u8>> {
+        // SAFETY: self.inner is non-null (from constructor).
         let n = unsafe { (*self.inner).n[htslib::BCF_DT_ID as usize] } as u32;
         if *id >= n {
             return Err(Error::UnknownID {
                 id: format!("{}", *id),
             });
         }
+        // SAFETY: id is bounds-checked above; dict entry key is a valid NUL-terminated C string from htslib.
         let key = unsafe {
             ffi::CStr::from_ptr(
                 (*(*self.inner).id[htslib::BCF_DT_ID as usize].offset(*id as isize)).key,
@@ -463,6 +483,7 @@ impl HeaderView {
     /// Convert string sample name to its numeric identifier.
     pub fn sample_to_id(&self, id: &[u8]) -> Result<Id> {
         let c_str = ffi::CString::new(id).unwrap();
+        // SAFETY: self.inner is non-null (from constructor); c_str is a valid CString.
         unsafe {
             match htslib::bcf_hdr_id2int(
                 self.inner,
@@ -484,6 +505,7 @@ impl HeaderView {
                 name: format!("{}", *id),
             });
         }
+        // SAFETY: id is bounds-checked above; dict entry key is a valid NUL-terminated C string from htslib.
         let key = unsafe {
             ffi::CStr::from_ptr(
                 (*(*self.inner).id[htslib::BCF_DT_SAMPLE as usize].offset(*id as isize)).key,
@@ -497,12 +519,14 @@ impl HeaderView {
         fn parse_kv(rec: &htslib::bcf_hrec_t) -> LinearMap<String, String> {
             let mut result: LinearMap<String, String> = LinearMap::new();
             for i in 0_i32..(rec.nkeys) {
+                // SAFETY: i is within [0, nkeys); keys[i] is a valid NUL-terminated C string from htslib.
                 let key = unsafe {
                     ffi::CStr::from_ptr(*rec.keys.offset(i as isize))
                         .to_str()
                         .unwrap()
                         .to_string()
                 };
+                // SAFETY: i is within [0, nkeys); vals[i] is a valid NUL-terminated C string from htslib.
                 let value = unsafe {
                     ffi::CStr::from_ptr(*rec.vals.offset(i as isize))
                         .to_str()
@@ -515,8 +539,11 @@ impl HeaderView {
         }
 
         let mut result: Vec<HeaderRecord> = Vec::new();
+        // SAFETY: self.inner is non-null; nhrec and hrec are valid htslib header internals.
         for i in 0_i32..unsafe { (*self.inner).nhrec } {
+            // SAFETY: i is within [0, nhrec); hrec[i] is a valid pointer to a bcf_hrec_t.
             let rec = unsafe { &(**(*self.inner).hrec.offset(i as isize)) };
+            // SAFETY: rec.key is a valid NUL-terminated C string from htslib.
             let key = unsafe { ffi::CStr::from_ptr(rec.key).to_str().unwrap().to_string() };
             let record = match rec.type_ {
                 0 => HeaderRecord::Filter {
@@ -541,6 +568,7 @@ impl HeaderView {
                 },
                 5 => HeaderRecord::Generic {
                     key,
+                    // SAFETY: rec.value is a valid NUL-terminated C string for generic header records.
                     value: unsafe { ffi::CStr::from_ptr(rec.value).to_str().unwrap().to_string() },
                 },
                 _ => panic!("Unknown type: {}", rec.type_),
@@ -561,6 +589,7 @@ impl HeaderView {
 impl Clone for HeaderView {
     fn clone(&self) -> Self {
         HeaderView {
+            // SAFETY: self.inner is non-null (from constructor); bcf_hdr_dup returns a new copy.
             inner: unsafe { htslib::bcf_hdr_dup(self.inner) },
         }
     }
@@ -568,6 +597,7 @@ impl Clone for HeaderView {
 
 impl Drop for HeaderView {
     fn drop(&mut self) {
+        // SAFETY: self.inner was allocated by bcf_hdr_dup or htslib; bcf_hdr_destroy is symmetric.
         unsafe {
             htslib::bcf_hdr_destroy(self.inner);
         }

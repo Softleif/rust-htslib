@@ -212,6 +212,7 @@ pub struct Reader {
     header: Arc<HeaderView>,
 }
 
+// SAFETY: Reader owns its inner htsFile and header exclusively; not shared across threads.
 unsafe impl Send for Reader {}
 
 /// # Safety
@@ -253,9 +254,11 @@ impl Reader {
 
     fn new(path: &[u8]) -> Result<Self> {
         let htsfile = bcf_open(path, b"r")?;
+        // SAFETY: htsfile is non-null (checked in bcf_open); bcf_hdr_read returns a valid header.
         let header = unsafe { htslib::bcf_hdr_read(htsfile) };
         Ok(Reader {
             inner: htsfile,
+            // SAFETY: header was just read from a valid htsFile.
             header: Arc::new(unsafe { HeaderView::from_ptr(header) }),
         })
     }
@@ -263,8 +266,10 @@ impl Reader {
 
 impl Read for Reader {
     fn read(&mut self, record: &mut record::Record) -> Option<Result<()>> {
+        // SAFETY: self.inner and self.header.inner are non-null (from constructor); record.inner is valid.
         match unsafe { htslib::bcf_read(self.inner, self.header.inner, record.inner) } {
             0 => {
+                // SAFETY: record.inner is valid after a successful bcf_read.
                 unsafe {
                     // Always unpack record.
                     htslib::bcf_unpack(record.inner_mut(), htslib::BCF_UN_ALL as i32);
@@ -282,6 +287,7 @@ impl Read for Reader {
     }
 
     fn set_threads(&mut self, n_threads: usize) -> Result<()> {
+        // SAFETY: self.inner is non-null (from constructor).
         unsafe { set_threads(self.inner, n_threads) }
     }
 
@@ -297,6 +303,7 @@ impl Read for Reader {
 
 impl Drop for Reader {
     fn drop(&mut self) {
+        // SAFETY: self.inner was allocated by hts_open in bcf_open; hts_close is symmetric.
         unsafe {
             htslib::hts_close(self.inner);
         }
@@ -315,6 +322,7 @@ pub struct IndexedReader {
     current_region: Option<(u32, u64, Option<u64>)>,
 }
 
+// SAFETY: IndexedReader owns its inner bcf_srs_t and header exclusively; not shared across threads.
 unsafe impl Send for IndexedReader {}
 
 impl IndexedReader {
@@ -347,12 +355,16 @@ impl IndexedReader {
     /// * `path` - the path. Use "-" for stdin.
     fn new(path: &ffi::CStr) -> Result<Self> {
         // Create reader and require existence of index file.
+        // SAFETY: bcf_sr_init allocates a new synced reader.
         let ser_reader = unsafe { htslib::bcf_sr_init() };
+        // SAFETY: ser_reader is non-null (just allocated); 0 = BCF_SR_REQUIRE_IDX.
         unsafe {
             htslib::bcf_sr_set_opt(ser_reader, 0);
         } // 0: BCF_SR_REQUIRE_IDX
           // Attach a file with the path from the arguments.
+          // SAFETY: ser_reader is valid; path is a valid CStr.
         if unsafe { htslib::bcf_sr_add_reader(ser_reader, path.as_ptr()) } >= 0 {
+            // SAFETY: after successful bcf_sr_add_reader, readers[0].header is a valid pointer.
             let header = Arc::new(unsafe {
                 HeaderView::from_ptr(htslib::bcf_hdr_dup(
                     (*(*ser_reader).readers.offset(0)).header,
@@ -385,6 +397,7 @@ impl IndexedReader {
     pub fn fetch(&mut self, rid: u32, start: u64, end: Option<u64>) -> Result<()> {
         let contig = self.header.rid2name(rid)?;
         let contig = ffi::CString::new(contig).map_err(|_| BcfError::UnknownRID { rid })?;
+        // SAFETY: self.inner is non-null (from constructor); contig is a valid CString.
         if unsafe { htslib::bcf_sr_seek(self.inner, contig.as_ptr(), start as i64) } != 0 {
             Err(BcfError::GenomicSeek {
                 contig: contig.to_str().unwrap().to_owned(),
@@ -399,8 +412,10 @@ impl IndexedReader {
 
 impl Read for IndexedReader {
     fn read(&mut self, record: &mut record::Record) -> Option<Result<()>> {
+        // SAFETY: self.inner is non-null (from constructor).
         match unsafe { htslib::bcf_sr_next_line(self.inner) } {
             0 => {
+                // SAFETY: self.inner is non-null; errnum is a plain integer field.
                 if unsafe { (*self.inner).errnum } != 0 {
                     Some(Err(BcfError::InvalidRecord))
                 } else {
@@ -413,6 +428,7 @@ impl Read for IndexedReader {
                 // as it keeps its own buffer already for each record.  An alternative here
                 // would be to replace the `inner` value by an enum that can be a pointer
                 // into a synced reader or an owning popinter to an allocated record.
+                // FIXME: assumes buffer[0] exists after bcf_sr_next_line/bcf_sr_add_reader succeeds. This is a htslib invariant but is not validated in Rust.
                 unsafe {
                     htslib::bcf_copy(
                         record.inner,
@@ -420,6 +436,7 @@ impl Read for IndexedReader {
                     );
                 }
 
+                // SAFETY: record.inner is valid after a successful bcf_copy.
                 unsafe {
                     // Always unpack record.
                     htslib::bcf_unpack(record.inner_mut(), htslib::BCF_UN_ALL as i32);
@@ -449,6 +466,7 @@ impl Read for IndexedReader {
     fn set_threads(&mut self, n_threads: usize) -> Result<()> {
         assert!(n_threads > 0, "n_threads must be > 0");
 
+        // SAFETY: self.inner is non-null (from constructor).
         let r = unsafe { htslib::bcf_sr_set_threads(self.inner, n_threads as i32) };
         if r != 0 {
             Err(BcfError::SetThreads)
@@ -468,6 +486,7 @@ impl Read for IndexedReader {
 
 impl Drop for IndexedReader {
     fn drop(&mut self) {
+        // SAFETY: self.inner was allocated by bcf_sr_init; bcf_sr_destroy is symmetric.
         unsafe { htslib::bcf_sr_destroy(self.inner) };
     }
 }
@@ -515,6 +534,7 @@ pub mod synced {
     // TODO: add interface for setting threads, ensure that the pool is freed properly
     impl SyncedReader {
         pub fn new() -> Result<Self> {
+            // SAFETY: bcf_sr_init allocates a new synced reader.
             let inner = unsafe { crate::htslib::bcf_sr_init() };
             if inner.is_null() {
                 return Err(BcfError::AllocationError);
@@ -529,6 +549,7 @@ pub mod synced {
 
         /// Enable or disable requiring of index
         pub fn set_require_index(&mut self, do_require: bool) {
+            // SAFETY: self.inner is non-null (from constructor); require_index is a plain field.
             unsafe {
                 (*self.inner).require_index = if do_require { 1 } else { 0 };
             }
@@ -536,6 +557,7 @@ pub mod synced {
 
         /// Set the given bitmask of values from `sr_pairing` module.
         pub fn set_pairing(&mut self, bitmask: u32) {
+            // SAFETY: self.inner is non-null (from constructor); 1 = BCF_SR_PAIR_LOGIC.
             unsafe {
                 // TODO: 1 actually is BCF_SR_PAIR_LOGIC but is not available here?
                 crate::htslib::bcf_sr_set_opt(self.inner, 1, bitmask);
@@ -553,6 +575,7 @@ pub mod synced {
                 .ok_or_else(|| BcfError::NonUnicodePath(path.to_owned()))?;
             let p_cstring =
                 ffi::CString::new(p).map_err(|_| BcfError::NonUnicodePath(path.to_owned()))?;
+            // SAFETY: self.inner is non-null (from constructor); p_cstring is a valid CString.
             let res = unsafe { crate::htslib::bcf_sr_add_reader(self.inner, p_cstring.as_ptr()) };
 
             if res == 0 {
@@ -562,6 +585,7 @@ pub mod synced {
             }
 
             let i = (self.reader_count() - 1) as isize;
+            // SAFETY: reader was just added; readers[i].header is a valid pointer.
             let header = Arc::new(unsafe {
                 HeaderView::from_ptr(crate::htslib::bcf_hdr_dup(
                     (*(*self.inner).readers.offset(i)).header,
@@ -577,6 +601,7 @@ pub mod synced {
             if idx >= count {
                 return Err(BcfError::InvalidReaderIndex { idx, count });
             }
+            // SAFETY: self.inner is non-null; idx is bounds-checked above.
             unsafe {
                 crate::htslib::bcf_sr_remove_reader(self.inner, idx as i32);
             }
@@ -586,14 +611,17 @@ pub mod synced {
 
         /// Return number of open files/readers.
         pub fn reader_count(&self) -> u32 {
+            // SAFETY: self.inner is non-null (from constructor); nreaders is a plain field.
             unsafe { (*self.inner).nreaders as u32 }
         }
 
         /// Read next line and return number of readers that have the given line (0 if end of all files is reached).
         pub fn read_next(&mut self) -> Result<u32> {
+            // SAFETY: self.inner is non-null (from constructor).
             let num = unsafe { crate::htslib::bcf_sr_next_line(self.inner) as u32 };
 
             if num == 0 {
+                // SAFETY: self.inner is non-null; errnum is a plain integer field.
                 if unsafe { (*self.inner).errnum } != 0 {
                     return Err(BcfError::InvalidRecord);
                 }
@@ -606,6 +634,7 @@ pub mod synced {
                             if !self.has_line(idx)? {
                                 continue;
                             }
+                            // FIXME: assumes buffer[0] exists after bcf_sr_next_line/bcf_sr_add_reader succeeds. This is a htslib invariant but is not validated in Rust.
                             unsafe {
                                 let record = *(*(*self.inner).readers.offset(idx as isize))
                                     .buffer
@@ -628,6 +657,7 @@ pub mod synced {
             if idx >= count {
                 return Err(BcfError::InvalidReaderIndex { idx, count });
             }
+            // SAFETY: self.inner is non-null; idx is bounds-checked above; has_line has nreaders elements.
             Ok(unsafe { (*(*self.inner).has_line.offset(idx as isize)) != 0 })
         }
 
@@ -637,6 +667,7 @@ pub mod synced {
                 return Ok(None);
             }
             let record = Record::new(self.headers[idx as usize].clone());
+            // FIXME: assumes buffer[0] exists after bcf_sr_next_line/bcf_sr_add_reader succeeds. This is a htslib invariant but is not validated in Rust.
             unsafe {
                 crate::htslib::bcf_copy(
                     record.inner,
@@ -670,6 +701,7 @@ pub mod synced {
                 let contig = self.header(0)?.rid2name(rid)?;
                 ffi::CString::new(contig).map_err(|_| BcfError::UnknownRID { rid })?
             };
+            // SAFETY: self.inner is non-null (from constructor); contig is a valid CString.
             if unsafe { htslib::bcf_sr_seek(self.inner, contig.as_ptr(), start as i64) } != 0 {
                 Err(BcfError::GenomicSeek {
                     contig: contig.to_str().unwrap().to_owned(),
@@ -684,6 +716,7 @@ pub mod synced {
 
     impl Drop for SyncedReader {
         fn drop(&mut self) {
+            // SAFETY: self.inner was allocated by bcf_sr_init; bcf_sr_destroy is symmetric.
             unsafe { crate::htslib::bcf_sr_destroy(self.inner) };
         }
     }
@@ -703,6 +736,7 @@ pub struct Writer {
     subset: Option<SampleSubset>,
 }
 
+// SAFETY: Writer owns its inner htsFile and header exclusively; not shared across threads.
 unsafe impl Send for Writer {}
 
 impl Writer {
@@ -764,9 +798,11 @@ impl Writer {
         };
 
         let htsfile = bcf_open(path, mode)?;
+        // SAFETY: htsfile is non-null (checked in bcf_open); header.inner is valid.
         unsafe { htslib::bcf_hdr_write(htsfile, header.inner) };
         Ok(Writer {
             inner: htsfile,
+            // SAFETY: header.inner is valid; bcf_hdr_dup returns a new copy.
             header: Arc::new(unsafe { HeaderView::from_ptr(htslib::bcf_hdr_dup(header.inner)) }),
             subset: header.subset.clone(),
         })
@@ -790,6 +826,7 @@ impl Writer {
     ///
     /// - `record` - The `Record` to translate.
     pub fn translate(&mut self, record: &mut record::Record) {
+        // SAFETY: self.header.inner and record pointers are non-null (from constructors).
         unsafe {
             htslib::bcf_translate(self.header.inner, record.header().inner, record.inner);
         }
@@ -803,6 +840,7 @@ impl Writer {
     /// - `record` - The `Record` to modify.
     pub fn subset(&mut self, record: &mut record::Record) {
         if let Some(ref mut subset) = self.subset {
+            // SAFETY: self.header.inner and record.inner are non-null; subset length matches header.
             unsafe {
                 htslib::bcf_subset(
                     self.header.inner,
@@ -820,6 +858,7 @@ impl Writer {
     ///
     /// - `record` - The `Record` to write.
     pub fn write(&mut self, record: &record::Record) -> Result<()> {
+        // SAFETY: self.inner and self.header.inner are non-null (from constructor); record.inner is valid.
         if unsafe { htslib::bcf_write(self.inner, self.header.inner, record.inner) } == -1 {
             Err(BcfError::WriteRecord)
         } else {
@@ -834,12 +873,14 @@ impl Writer {
     ///
     /// * `n_threads` - number of extra background writer threads to use, must be `> 0`.
     pub fn set_threads(&mut self, n_threads: usize) -> Result<()> {
+        // SAFETY: self.inner is non-null (from constructor).
         unsafe { set_threads(self.inner, n_threads) }
     }
 }
 
 impl Drop for Writer {
     fn drop(&mut self) {
+        // SAFETY: self.inner was allocated by hts_open in bcf_open; hts_close is symmetric.
         unsafe {
             htslib::hts_close(self.inner);
         }
@@ -876,6 +917,7 @@ fn bcf_open(target: &[u8], mode: &[u8]) -> Result<*mut htslib::htsFile> {
         target: String::from_utf8_lossy(target).into_owned(),
     })?;
     let c_str = ffi::CString::new(mode).unwrap();
+    // SAFETY: p and c_str are valid NUL-terminated CStrings.
     let ret = unsafe { htslib::hts_open(p.as_ptr(), c_str.as_ptr()) };
 
     if ret.is_null() {
@@ -884,6 +926,7 @@ fn bcf_open(target: &[u8], mode: &[u8]) -> Result<*mut htslib::htsFile> {
         });
     }
 
+    // SAFETY: ret is non-null (checked above); format.category is a plain field.
     unsafe {
         if !(mode.contains(&b'w')
             || (*ret).format.category == htslib::htsFormatCategory_variant_data)

@@ -140,6 +140,7 @@ impl Default for Buffer {
 
 impl Drop for Buffer {
     fn drop(&mut self) {
+        // SAFETY: self.inner was allocated by htslib via bcf_get_info_values/bcf_get_format_values; free is symmetric.
         unsafe {
             ::libc::free(self.inner);
         }
@@ -195,6 +196,7 @@ pub struct Record {
 impl Record {
     /// Construct record with reference to header `HeaderView`, for create-internal use.
     pub fn new(header: Arc<HeaderView>) -> Self {
+        // SAFETY: bcf_init allocates a new record; bcf_unpack initializes it.
         let inner = unsafe {
             let inner = htslib::bcf_init();
             // Always unpack record.
@@ -206,6 +208,7 @@ impl Record {
 
     /// Force unpacking of internal record values.
     pub fn unpack(&mut self) {
+        // SAFETY: self.inner is non-null (from constructor).
         unsafe { htslib::bcf_unpack(self.inner, htslib::BCF_UN_ALL as i32) };
     }
 
@@ -216,6 +219,7 @@ impl Record {
 
     /// Translate the record to the given header.
     pub fn translate(&mut self, dst_header: &mut Arc<HeaderView>) -> Result<()> {
+        // SAFETY: dst_header.inner, self.header().inner, and self.inner are non-null (from constructors).
         if unsafe { htslib::bcf_translate(dst_header.inner, self.header().inner, self.inner) } == 0
         {
             self.set_header(Arc::clone(dst_header));
@@ -237,6 +241,7 @@ impl Record {
     /// Note that this function is only required as long as Rust-Htslib does not provide full
     /// access to all aspects of Htslib.
     pub fn inner(&self) -> &htslib::bcf1_t {
+        // SAFETY: self.inner is non-null (from constructor or bcf_dup).
         unsafe { &*self.inner }
     }
 
@@ -247,6 +252,7 @@ impl Record {
     /// Note that this function is only required as long as Rust-Htslib does not provide full
     /// access to all aspects of Htslib.
     pub fn inner_mut(&mut self) -> &mut htslib::bcf1_t {
+        // SAFETY: self.inner is non-null (from constructor or bcf_dup); we have &mut self.
         unsafe { &mut *self.inner }
     }
 
@@ -337,6 +343,7 @@ impl Record {
         if self.inner().d.id.is_null() {
             b".".to_vec()
         } else {
+            // SAFETY: d.id is checked for null above; it is a valid NUL-terminated C string from htslib.
             let id = unsafe { ffi::CStr::from_ptr(self.inner().d.id) };
             id.to_bytes().to_vec()
         }
@@ -345,6 +352,7 @@ impl Record {
     /// Update the ID string to the given value.
     pub fn set_id(&mut self, id: &[u8]) -> Result<()> {
         let c_str = ffi::CString::new(id).unwrap();
+        // SAFETY: self.header().inner and self.inner are non-null (from constructor); c_str is valid.
         if unsafe {
             htslib::bcf_update_id(
                 self.header().inner,
@@ -362,6 +370,7 @@ impl Record {
     /// Clear the ID column (set it to `"."`).
     pub fn clear_id(&mut self) -> Result<()> {
         let c_str = ffi::CString::new(&b"."[..]).unwrap();
+        // SAFETY: self.header().inner and self.inner are non-null (from constructor); c_str is valid.
         if unsafe {
             htslib::bcf_update_id(
                 self.header().inner,
@@ -379,6 +388,7 @@ impl Record {
     /// Add the ID string (the ID field is semicolon-separated), checking for duplicates.
     pub fn push_id(&mut self, id: &[u8]) -> Result<()> {
         let c_str = ffi::CString::new(id).unwrap();
+        // SAFETY: self.header().inner and self.inner are non-null (from constructor); c_str is valid.
         if unsafe {
             htslib::bcf_add_id(
                 self.header().inner,
@@ -433,6 +443,7 @@ impl Record {
             Err(_) => return false,
         };
         for i in 0..(self.inner().d.n_flt as isize) {
+            // SAFETY: i is within [0, n_flt); d.flt is a valid pointer with n_flt elements.
             if unsafe { *self.inner().d.flt.offset(i) } == id as i32 {
                 return true;
             }
@@ -481,6 +492,7 @@ impl Record {
             .iter()
             .map(|id| id.id_from_header(self.header()).map(|id| *id as i32))
             .collect::<Result<Vec<i32>>>()?;
+        // SAFETY: self.header().inner and self.inner are non-null (from constructor); ids is a valid slice.
         unsafe {
             htslib::bcf_update_filter(
                 self.header().inner,
@@ -526,6 +538,7 @@ impl Record {
     ///
     pub fn push_filter<T: FilterId + ?Sized>(&mut self, flt_id: &T) -> Result<()> {
         let id = flt_id.id_from_header(self.header())?;
+        // SAFETY: self.header().inner and self.inner are non-null (from constructor); id is valid.
         unsafe {
             htslib::bcf_add_filter(self.header().inner, self.inner, *id as i32);
         };
@@ -576,6 +589,7 @@ impl Record {
         pass_on_empty: bool,
     ) -> Result<()> {
         let id = flt_id.id_from_header(self.header())?;
+        // SAFETY: self.header().inner and self.inner are non-null (from constructor); id is valid.
         unsafe {
             htslib::bcf_remove_filter(
                 self.header().inner,
@@ -591,11 +605,14 @@ impl Record {
     ///
     /// The first allele is the reference allele.
     pub fn alleles(&self) -> Vec<&[u8]> {
+        // SAFETY: self.inner is non-null (from constructor).
         unsafe { htslib::bcf_unpack(self.inner, htslib::BCF_UN_ALL as i32) };
         let n = self.inner().n_allele() as usize;
         let dec = self.inner().d;
+        // SAFETY: dec.allele points to n valid C string pointers after bcf_unpack.
         let alleles = unsafe { slice::from_raw_parts(dec.allele, n) };
         (0..n)
+            // SAFETY: each alleles[i] is a valid NUL-terminated C string from htslib.
             .map(|i| unsafe { ffi::CStr::from_ptr(alleles[i]).to_bytes() })
             .collect()
     }
@@ -629,6 +646,7 @@ impl Record {
             .iter()
             .map(|cstr| cstr.as_ptr() as *const c_char)
             .collect();
+        // SAFETY: self.header().inner and self.inner are non-null; ptrs contains valid CString pointers.
         if unsafe {
             htslib::bcf_update_alleles(
                 self.header().inner,
@@ -934,6 +952,7 @@ impl Record {
     /// Add a format tag. Data is a flattened two-dimensional array.
     /// The first dimension contains one array for each sample.
     fn push_format<T>(&mut self, tag: &CStr8, data: &[T], ht: u32) -> Result<()> {
+        // SAFETY: self.header().inner and self.inner are non-null; tag is a valid CStr8; data is a valid slice.
         unsafe {
             if htslib::bcf_update_format(
                 self.header().inner,
@@ -978,6 +997,7 @@ impl Record {
             .iter()
             .map(|s| s.as_ptr() as *mut i8)
             .collect::<Vec<*mut i8>>();
+        // SAFETY: self.header().inner and self.inner are non-null; tag is valid; c_ptrs contains valid CString pointers.
         unsafe {
             if htslib::bcf_update_format_string(
                 self.header().inner,
@@ -1021,6 +1041,7 @@ impl Record {
     /// * `data` - the data to set
     /// * `ht` - the HTSLib type to use
     fn push_info<T>(&mut self, tag: &CStr8, data: &[T], ht: u32) -> Result<()> {
+        // SAFETY: self.header().inner and self.inner are non-null; tag is a valid CStr8; data is a valid slice.
         unsafe {
             if htslib::bcf_update_info(
                 self.header().inner,
@@ -1070,6 +1091,7 @@ impl Record {
         len: i32,
         ht: u32,
     ) -> Result<()> {
+        // SAFETY: caller guarantees ptr and len are valid; self.header().inner and self.inner are non-null.
         unsafe {
             if htslib::bcf_update_info(
                 self.header().inner,
@@ -1127,6 +1149,7 @@ impl Record {
         } else {
             c_str.to_bytes().len()
         };
+        // SAFETY: self.header().inner and self.inner are non-null; c_str is a valid CString; len matches data.
         unsafe {
             if htslib::bcf_update_info(
                 self.header().inner,
@@ -1146,6 +1169,7 @@ impl Record {
 
     /// Remove unused alleles.
     pub fn trim_alleles(&mut self) -> Result<()> {
+        // SAFETY: self.header().inner and self.inner are non-null (from constructor).
         match unsafe { htslib::bcf_trim_alleles(self.header().inner, self.inner) } {
             -1 => Err(Error::RemoveAlleles),
             _ => Ok(()),
@@ -1153,18 +1177,22 @@ impl Record {
     }
 
     pub fn remove_alleles(&mut self, remove: &[bool]) -> Result<()> {
+        // SAFETY: kbs_init allocates a bitset of the given size.
         let rm_set = unsafe { htslib::kbs_init(remove.len()) };
 
         for (i, &r) in remove.iter().enumerate() {
             if r {
+                // SAFETY: rm_set is valid; i is within the allocated bitset size.
                 unsafe {
                     htslib::kbs_insert(rm_set, i as i32);
                 }
             }
         }
 
+        // SAFETY: self.header().inner and self.inner are non-null; rm_set is a valid bitset.
         let ret = unsafe { htslib::bcf_remove_allele_set(self.header().inner, self.inner, rm_set) };
 
+        // SAFETY: rm_set was allocated by kbs_init; kbs_destroy is symmetric.
         unsafe {
             htslib::kbs_destroy(rm_set);
         }
@@ -1221,6 +1249,7 @@ impl Record {
     /// assert_eq!(record.pos(), 0)
     /// ```
     pub fn clear(&self) {
+        // SAFETY: self.inner is non-null (from constructor).
         unsafe { htslib::bcf_clear(self.inner) }
     }
 
@@ -1244,10 +1273,12 @@ impl Record {
             m: 0,
             s: ptr::null_mut(),
         };
+        // SAFETY: self.header().inner and self.inner are non-null; buf is a valid kstring_t.
         let ret = unsafe { htslib::vcf_format(self.header().inner, self.inner, &mut buf) };
 
         if ret < 0 {
             if !buf.s.is_null() {
+                // SAFETY: buf.s was allocated by vcf_format; free is symmetric.
                 unsafe {
                     libc::free(buf.s as *mut libc::c_void);
                 }
@@ -1255,6 +1286,7 @@ impl Record {
             return Err(Error::ToString);
         }
 
+        // SAFETY: buf.s is non-null after successful vcf_format; it is a valid NUL-terminated C string.
         let vcf_str = unsafe {
             let vcf_str = String::from(ffi::CStr::from_ptr(buf.s).to_str().unwrap());
             if !buf.s.is_null() {
@@ -1269,6 +1301,7 @@ impl Record {
 
 impl Clone for Record {
     fn clone(&self) -> Self {
+        // SAFETY: self.inner is non-null (from constructor); bcf_dup returns a new copy.
         let inner = unsafe { htslib::bcf_dup(self.inner) };
         Record {
             inner,
@@ -1408,12 +1441,15 @@ impl<'a, B: Borrow<Buffer> + 'a> Genotypes<'a, B> {
 
 impl Drop for Record {
     fn drop(&mut self) {
+        // SAFETY: self.inner was allocated by bcf_init or bcf_dup; bcf_destroy is symmetric.
         unsafe { htslib::bcf_destroy(self.inner) };
     }
 }
 
+// SAFETY: Record owns its inner bcf1_t exclusively; header is Arc<HeaderView> which is Send+Sync.
 unsafe impl Send for Record {}
 
+// SAFETY: Record owns its inner bcf1_t exclusively; header is Arc<HeaderView> which is Send+Sync.
 unsafe impl Sync for Record {}
 
 /// Info tag representation.
@@ -1435,6 +1471,7 @@ impl<'b, B: BorrowMut<Buffer> + Borrow<Buffer> + 'b> Info<'_, B> {
     fn data(&mut self, data_type: u32) -> Result<Option<i32>> {
         let mut n: i32 = self.buffer.borrow().len;
         let c_str = ffi::CString::new(self.tag).unwrap();
+        // SAFETY: record header and inner are non-null; c_str is valid; buffer.inner is managed by htslib.
         let ret = unsafe {
             htslib::bcf_get_info_values(
                 self.record.header().inner,
@@ -1466,6 +1503,7 @@ impl<'b, B: BorrowMut<Buffer> + Borrow<Buffer> + 'b> Info<'_, B> {
     pub fn integer(mut self) -> Result<Option<BufferBacked<'b, &'b [i32], B>>> {
         self.data(htslib::BCF_HT_INT).map(|data| {
             data.map(|ret| {
+                // SAFETY: buffer.inner was filled by bcf_get_info_values; ret is the element count.
                 let values = unsafe {
                     slice::from_raw_parts(self.buffer.borrow().inner as *const i32, ret as usize)
                 };
@@ -1485,6 +1523,7 @@ impl<'b, B: BorrowMut<Buffer> + Borrow<Buffer> + 'b> Info<'_, B> {
     pub fn float(mut self) -> Result<Option<BufferBacked<'b, &'b [f32], B>>> {
         self.data(htslib::BCF_HT_REAL).map(|data| {
             data.map(|ret| {
+                // SAFETY: buffer.inner was filled by bcf_get_info_values; ret is the element count.
                 let values = unsafe {
                     slice::from_raw_parts(self.buffer.borrow().inner as *const f32, ret as usize)
                 };
@@ -1511,6 +1550,7 @@ impl<'b, B: BorrowMut<Buffer> + Borrow<Buffer> + 'b> Info<'_, B> {
         self.data(htslib::BCF_HT_STR).map(|data| {
             data.map(|ret| {
                 BufferBacked::new(
+                    // SAFETY: buffer.inner was filled by bcf_get_info_values; ret is the byte count.
                     unsafe {
                         slice::from_raw_parts(self.buffer.borrow().inner as *const u8, ret as usize)
                     }
@@ -1529,8 +1569,10 @@ impl<'b, B: BorrowMut<Buffer> + Borrow<Buffer> + 'b> Info<'_, B> {
     }
 }
 
+// SAFETY: Info borrows a Record (Send+Sync) and owns a Buffer; no shared mutable state across threads.
 unsafe impl<B: BorrowMut<Buffer> + Borrow<Buffer>> Send for Info<'_, B> {}
 
+// SAFETY: Info borrows a Record (Send+Sync) and owns a Buffer; no shared mutable state across threads.
 unsafe impl<B: BorrowMut<Buffer> + Borrow<Buffer>> Sync for Info<'_, B> {}
 
 fn trim_slice<T: PartialEq + NumericUtils>(s: &[T]) -> &[T] {
@@ -1552,6 +1594,7 @@ impl<'a, 'b, B: BorrowMut<Buffer> + Borrow<Buffer> + 'b> Format<'a, B> {
     /// Create new format data in a given record.
     fn new(record: &'a Record, tag: &'a [u8], buffer: B) -> Format<'a, B> {
         let c_str = ffi::CString::new(tag).unwrap();
+        // SAFETY: record header and inner are non-null (from constructor); c_str is a valid CString.
         let inner = unsafe {
             htslib::bcf_get_fmt(
                 record.header().inner,
@@ -1573,10 +1616,12 @@ impl<'a, 'b, B: BorrowMut<Buffer> + Borrow<Buffer> + 'b> Format<'a, B> {
     }
 
     pub fn inner(&self) -> &htslib::bcf_fmt_t {
+        // SAFETY: self.inner is set by bcf_get_fmt which returns a valid pointer (or null handled by caller).
         unsafe { &*self.inner }
     }
 
     pub fn inner_mut(&mut self) -> &mut htslib::bcf_fmt_t {
+        // SAFETY: self.inner is set by bcf_get_fmt; we have &mut self.
         unsafe { &mut *self.inner }
     }
 
@@ -1588,6 +1633,7 @@ impl<'a, 'b, B: BorrowMut<Buffer> + Borrow<Buffer> + 'b> Format<'a, B> {
     fn data(&mut self, data_type: u32) -> Result<i32> {
         let mut n: i32 = self.buffer.borrow().len;
         let c_str = ffi::CString::new(self.tag).unwrap();
+        // SAFETY: record header and inner are non-null; c_str is valid; buffer.inner is managed by htslib.
         let ret = unsafe {
             htslib::bcf_get_format_values(
                 self.record.header().inner,
@@ -1619,6 +1665,7 @@ impl<'a, 'b, B: BorrowMut<Buffer> + Borrow<Buffer> + 'b> Format<'a, B> {
     pub fn integer(mut self) -> Result<BufferBacked<'b, Vec<&'b [i32]>, B>> {
         self.data(htslib::BCF_HT_INT).map(|ret| {
             BufferBacked::new(
+                // SAFETY: buffer.inner was filled by bcf_get_format_values; ret is the element count.
                 unsafe {
                     slice::from_raw_parts(
                         self.buffer.borrow_mut().inner as *const i32,
@@ -1642,6 +1689,7 @@ impl<'a, 'b, B: BorrowMut<Buffer> + Borrow<Buffer> + 'b> Format<'a, B> {
     pub fn float(mut self) -> Result<BufferBacked<'b, Vec<&'b [f32]>, B>> {
         self.data(htslib::BCF_HT_REAL).map(|ret| {
             BufferBacked::new(
+                // SAFETY: buffer.inner was filled by bcf_get_format_values; ret is the element count.
                 unsafe {
                     slice::from_raw_parts(
                         self.buffer.borrow_mut().inner as *const f32,
@@ -1668,6 +1716,7 @@ impl<'a, 'b, B: BorrowMut<Buffer> + Borrow<Buffer> + 'b> Format<'a, B> {
                 return BufferBacked::new(Vec::new(), self.buffer);
             }
             BufferBacked::new(
+                // SAFETY: buffer.inner was filled by bcf_get_format_values; ret is the byte count.
                 unsafe {
                     slice::from_raw_parts(self.buffer.borrow_mut().inner as *const u8, ret as usize)
                 }
@@ -1685,8 +1734,10 @@ impl<'a, 'b, B: BorrowMut<Buffer> + Borrow<Buffer> + 'b> Format<'a, B> {
     }
 }
 
+// SAFETY: Format borrows a Record (Send+Sync) and owns a Buffer; no shared mutable state across threads.
 unsafe impl<B: BorrowMut<Buffer> + Borrow<Buffer>> Send for Format<'_, B> {}
 
+// SAFETY: Format borrows a Record (Send+Sync) and owns a Buffer; no shared mutable state across threads.
 unsafe impl<B: BorrowMut<Buffer> + Borrow<Buffer>> Sync for Format<'_, B> {}
 
 #[derive(Debug)]
@@ -1712,6 +1763,7 @@ impl Iterator for Filters<'_> {
         } else {
             let i = self.idx as isize;
             self.idx += 1;
+            // SAFETY: i is within [0, n_flt); d.flt is a valid pointer with n_flt elements.
             Some(Id(unsafe { *self.record.inner().d.flt.offset(i) } as u32))
         }
     }

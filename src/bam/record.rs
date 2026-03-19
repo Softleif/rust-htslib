@@ -57,12 +57,14 @@ pub struct Record {
     header: Option<Arc<HeaderView>>,
 }
 
+// SAFETY: Record owns its bam1_t data buffer; no interior mutability or shared references to FFI state.
 unsafe impl Send for Record {}
 unsafe impl Sync for Record {}
 
 impl Clone for Record {
     fn clone(&self) -> Self {
         let mut copy = Record::new();
+        // SAFETY: both pointers are valid bam1_t structs; bam_copy1 deep-copies all data.
         unsafe { htslib::bam_copy1(copy.inner_ptr_mut(), self.inner_ptr()) };
         copy
     }
@@ -115,6 +117,7 @@ impl Record {
     /// Create an empty BAM record.
     pub fn new() -> Self {
         let mut record = Record {
+            // SAFETY: bam1_t is a C struct where all-zeros is a valid initial state (null data pointer, zero lengths).
             inner: unsafe { MaybeUninit::zeroed().assume_init() },
             own: true,
             cigar: None,
@@ -136,8 +139,10 @@ impl Record {
     pub fn from_inner(from: *mut htslib::bam1_t) -> Self {
         Record {
             inner: {
+                // SAFETY: inner is immediately overwritten by memcpy below; never read in uninitialized state.
                 #[allow(clippy::uninit_assumed_init, invalid_value)]
                 let mut inner = unsafe { MaybeUninit::uninit().assume_init() };
+                // SAFETY: from must be a valid bam1_t pointer (caller invariant); memcpy copies the full struct.
                 unsafe {
                     ::libc::memcpy(
                         &mut inner as *mut htslib::bam1_t as *mut ::libc::c_void,
@@ -167,6 +172,7 @@ impl Record {
             m: sam_copy.len(),
         };
 
+        // SAFETY: sam_string points to a valid NUL-terminated copy; header and record pointers are valid.
         let succ = unsafe {
             htslib::sam_parse1(
                 &mut sam_string,
@@ -189,6 +195,7 @@ impl Record {
     }
 
     pub(super) fn data(&self) -> &[u8] {
+        // SAFETY: inner.data is valid for inner.l_data bytes (maintained by htslib and our set_data methods).
         unsafe { slice::from_raw_parts(self.inner().data, self.inner().l_data as usize) }
     }
 
@@ -331,6 +338,7 @@ impl Record {
         }
 
         // Copy new data into buffer
+        // SAFETY: inner.data is valid for at least l_data bytes (realloc'd above if needed).
         let data =
             unsafe { slice::from_raw_parts_mut(self.inner.data, self.inner().l_data as usize) };
         utils::copy_memory(new_data, data);
@@ -373,11 +381,13 @@ impl Record {
 
         // Copy the aux data.
         if aux_len > 0 && orig_aux_offset != new_aux_offset {
+            // SAFETY: inner.data is valid for m_data bytes; offsets are within bounds.
             let data =
                 unsafe { slice::from_raw_parts_mut(self.inner.data, self.inner().m_data as usize) };
             data.copy_within(orig_aux_offset..orig_aux_offset + aux_len, new_aux_offset);
         }
 
+        // SAFETY: inner.data is valid for l_data bytes (realloc'd above if needed).
         let data =
             unsafe { slice::from_raw_parts_mut(self.inner.data, self.inner().l_data as usize) };
 
@@ -392,6 +402,7 @@ impl Record {
 
         // cigar
         if let Some(cigar_string) = cigar {
+            // SAFETY: cigar offset is always 4-byte aligned (qname padded with extranul); length from cigar_string.
             let cigar_data = unsafe {
                 //cigar is always aligned to 4 bytes (see extranul above) - so this is safe
                 #[allow(clippy::cast_ptr_alignment)]
@@ -433,6 +444,7 @@ impl Record {
         );
 
         let seq_offset = self.qname_capacity() + self.cigar_len() * 4;
+        // SAFETY: inner.data is valid for l_data bytes; seq_offset is within bounds (same length seq).
         let data =
             unsafe { slice::from_raw_parts_mut(self.inner.data, self.inner().l_data as usize) };
         for j in (0..new_seq.len()).step_by(2) {
@@ -473,6 +485,7 @@ impl Record {
 
         if new_q_len != old_q_len {
             // Move other data to new location
+            // SAFETY: inner.data is valid for l_data bytes (realloc'd if needed above); memmove handles overlap.
             unsafe {
                 let data = slice::from_raw_parts_mut(self.inner.data, self.inner().l_data as usize);
 
@@ -485,6 +498,7 @@ impl Record {
         }
 
         // Copy qname data
+        // SAFETY: inner.data is valid for l_data bytes.
         let data =
             unsafe { slice::from_raw_parts_mut(self.inner.data, self.inner().l_data as usize) };
         utils::copy_memory(new_qname, data);
@@ -526,6 +540,7 @@ impl Record {
 
         if new_cigar_data_len != old_cigar_data_len {
             // Move other data to new location
+            // SAFETY: inner.data is valid for l_data bytes (realloc'd if needed above); memmove handles overlap.
             unsafe {
                 ::libc::memmove(
                     self.inner.data.add(qname_data_len + new_cigar_data_len) as *mut ::libc::c_void,
@@ -537,6 +552,7 @@ impl Record {
 
         // Copy cigar data
         if let Some(cigar_string) = new_cigar {
+            // SAFETY: cigar offset is 4-byte aligned (qname padded); inner.data valid for l_data bytes.
             let cigar_data = unsafe {
                 #[allow(clippy::cast_ptr_alignment)]
                 slice::from_raw_parts_mut(
@@ -556,6 +572,7 @@ impl Record {
         let new_len = new_len as u32;
         let new_request = new_len + 32 - (new_len % 32);
 
+        // SAFETY: inner.data is either null (initial state) or was previously allocated by malloc/realloc.
         let ptr = unsafe {
             ::libc::realloc(
                 self.inner().data as *mut ::libc::c_void,
@@ -583,7 +600,7 @@ impl Record {
     /// Get reference to raw cigar string representation (as stored in BAM file).
     /// Usually, the method `Record::cigar` should be used instead.
     pub fn raw_cigar(&self) -> &[u32] {
-        //cigar is always aligned to 4 bytes - so this is safe
+        // SAFETY: cigar data starts at a 4-byte-aligned offset (qname is padded); length from n_cigar.
         #[allow(clippy::cast_ptr_alignment)]
         unsafe {
             slice::from_raw_parts(
@@ -657,12 +674,14 @@ impl Record {
         if tag.len() < 2 {
             return Err(Error::AuxStringError);
         }
+        // SAFETY: self.inner is a valid bam1_t; tag points to at least 2 bytes.
         let aux = unsafe {
             htslib::bam_aux_get(
                 &self.inner as *const htslib::bam1_t,
                 tag.as_ptr() as *const c_char,
             )
         };
+        // SAFETY: aux is either null (handled inside parse_aux_field) or points into record's aux data.
         unsafe { parse_aux_field(aux).map(|(aux_field, _length)| aux_field) }
     }
 
@@ -703,6 +722,7 @@ impl Record {
     /// This is provided as a performance optimization.
     pub fn push_aux_unchecked(&mut self, tag: &[u8], value: Aux<'_>) -> Result<()> {
         let ctag = tag.as_ptr() as *mut c_char;
+        // SAFETY: self.inner_ptr_mut() is valid; ctag points to at least 2 bytes; value data is valid for the call.
         let ret = unsafe {
             match value {
                 Aux::Char(v) => htslib::bam_aux_append(
@@ -919,6 +939,7 @@ impl Record {
         // the end of the existing aux records if it is a new tag.
 
         let ctag = tag.as_ptr() as *mut c_char;
+        // SAFETY: self.inner_ptr_mut() is valid; ctag points to at least 2 bytes; value data is valid for the call.
         let ret = unsafe {
             match value {
                 Aux::Char(_v) => return Err(Error::AuxTagUpdatingNotSupported),
@@ -1071,12 +1092,14 @@ impl Record {
         if tag.len() < 2 {
             return Err(Error::AuxStringError);
         }
+        // SAFETY: self.inner is a valid bam1_t; tag points to at least 2 bytes.
         let aux = unsafe {
             htslib::bam_aux_get(
                 &self.inner as *const htslib::bam1_t,
                 tag.as_ptr() as *const c_char,
             )
         };
+        // SAFETY: aux is checked for null below; bam_aux_del modifies the record's aux data in place.
         unsafe {
             if aux.is_null() {
                 Err(Error::AuxTagNotFound)
@@ -1221,6 +1244,7 @@ impl Record {
 impl Drop for Record {
     fn drop(&mut self) {
         if self.own {
+            // SAFETY: inner.data was allocated by malloc/realloc (tracked by self.own); free is symmetric.
             unsafe { ::libc::free(self.inner.data as *mut ::libc::c_void) }
         }
     }
@@ -1358,6 +1382,7 @@ pub enum Aux<'a> {
     ArrayFloat(AuxArray<'a, f32>),
 }
 
+// SAFETY: Aux borrows only immutable data (&str, &[u8]) from the record's data buffer.
 unsafe impl Send for Aux<'_> {}
 unsafe impl Sync for Aux<'_> {}
 
@@ -1806,6 +1831,7 @@ impl<'a> Iterator for AuxIter<'a> {
             return Some(Err(Error::AuxParsingError));
         }
         let tag = &self.aux[..2];
+        // SAFETY: data_ptr points into the record's aux data buffer; parse_aux_field validates the format.
         Some(unsafe {
             let data_ptr = self.aux[2..].as_ptr();
             parse_aux_field(data_ptr)
@@ -2012,12 +2038,16 @@ fn encoded_base(encoded_seq: &[u8], i: usize) -> u8 {
 }
 
 #[inline]
+/// # Safety
+/// Caller must ensure `i / 2 < encoded_seq.len()`.
 unsafe fn encoded_base_unchecked(encoded_seq: &[u8], i: usize) -> u8 {
+    // SAFETY: caller guarantees i/2 is in bounds.
     (encoded_seq.get_unchecked(i / 2) >> ((!i & 1) << 2)) & 0b1111
 }
 
 #[inline]
 fn decode_base_unchecked(base: u8) -> &'static u8 {
+    // SAFETY: base is a 4-bit value (0..15) from encoded BAM data; DECODE_BASE has 16 entries.
     unsafe { DECODE_BASE.get_unchecked(base as usize) }
 }
 
@@ -2109,6 +2139,7 @@ impl ops::Index<usize> for Seq<'_> {
     }
 }
 
+// SAFETY: Seq borrows only an immutable &[u8] slice from the record's data buffer.
 unsafe impl Send for Seq<'_> {}
 unsafe impl Sync for Seq<'_> {}
 
@@ -2150,6 +2181,7 @@ impl<'a> RecordView<'a> {
     }
 
     fn data(&self) -> &'a [u8] {
+        // SAFETY: inner.data is valid for inner.l_data bytes (maintained by htslib); lifetime tied to 'a.
         unsafe { slice::from_raw_parts(self.inner.data, self.inner.l_data as usize) }
     }
 
@@ -2177,6 +2209,7 @@ impl<'a> RecordView<'a> {
 
     /// Get reference to raw cigar string representation.
     pub fn raw_cigar(&self) -> &'a [u32] {
+        // SAFETY: cigar data starts at a 4-byte-aligned offset (qname is padded); length from n_cigar.
         #[allow(clippy::cast_ptr_alignment)]
         unsafe {
             slice::from_raw_parts(
@@ -2274,12 +2307,14 @@ impl<'a> RecordView<'a> {
         if tag.len() < 2 {
             return Err(Error::AuxStringError);
         }
+        // SAFETY: self.inner is a valid bam1_t; tag points to at least 2 bytes.
         let aux = unsafe {
             htslib::bam_aux_get(
                 self.inner as *const htslib::bam1_t,
                 tag.as_ptr() as *const c_char,
             )
         };
+        // SAFETY: aux is either null (handled inside parse_aux_field) or points into record's aux data.
         unsafe { parse_aux_field(aux).map(|(aux_field, _length)| aux_field) }
     }
 
@@ -2443,6 +2478,7 @@ impl fmt::Display for Cigar {
     }
 }
 
+// SAFETY: Cigar is a simple Copy enum with no pointers or interior mutability.
 unsafe impl Send for Cigar {}
 unsafe impl Sync for Cigar {}
 
@@ -2991,6 +3027,7 @@ impl BaseModificationState<'_> {
     /// and initializes the iterator to the start of the modification
     /// records.
     fn new(r: &Record) -> Result<BaseModificationState<'_>> {
+        // SAFETY: hts_base_mod_state_alloc returns a valid pointer or null (checked below).
         let mut bm = unsafe {
             BaseModificationState {
                 record: r,
@@ -3005,6 +3042,7 @@ impl BaseModificationState<'_> {
         }
 
         // parse the MM tag to initialize the state
+        // SAFETY: bm.record.inner_ptr() is valid; bm.state is non-null (checked above).
         unsafe {
             let ret = hts_sys::bam_parse_basemod(bm.record.inner_ptr(), bm.state);
             if ret != 0 {
@@ -3018,6 +3056,7 @@ impl BaseModificationState<'_> {
     }
 
     pub fn buffer_next_mods(&mut self) -> Result<usize> {
+        // SAFETY: record and state pointers are valid (from constructor); buffer has sufficient capacity.
         unsafe {
             let ret = hts_sys::bam_next_basemod(
                 self.record.inner_ptr(),
@@ -3049,6 +3088,7 @@ impl BaseModificationState<'_> {
     /// Return an array containing the modification codes listed for this record.
     /// Positive values are ascii character codes (eg m), negative values are chEBI codes.
     pub fn recorded<'a>(&self) -> &'a [i32] {
+        // SAFETY: self.state is non-null (from constructor); bam_mods_recorded returns pointer into state's data.
         unsafe {
             let mut n: i32 = 0;
             let data_ptr: *const i32 = hts_sys::bam_mods_recorded(self.state, &mut n);
@@ -3058,6 +3098,7 @@ impl BaseModificationState<'_> {
                 panic!("Unable to obtain pointer to base modifications");
             }
             assert!(n >= 0);
+            // SAFETY: data_ptr is non-null (checked above); n is the count returned by htslib.
             slice::from_raw_parts(data_ptr, n as usize)
         }
     }
@@ -3068,6 +3109,7 @@ impl BaseModificationState<'_> {
     /// If there are multiple modifications with the same code this will return the data
     /// for the first mod.  See https://github.com/samtools/htslib/issues/1635
     pub fn query_type(&self, code: i32) -> Result<BaseModificationMetadata> {
+        // SAFETY: self.state is non-null (from constructor); output pointers are valid stack references.
         unsafe {
             let mut strand: i32 = 0;
             let mut implicit: i32 = 0;
@@ -3096,6 +3138,7 @@ impl BaseModificationState<'_> {
 
 impl Drop for BaseModificationState<'_> {
     fn drop<'a>(&mut self) {
+        // SAFETY: self.state was allocated by hts_base_mod_state_alloc; free is symmetric.
         unsafe {
             hts_sys::hts_base_mod_state_free(self.state);
         }

@@ -25,7 +25,9 @@ pub struct RecordBuffer {
     overflow: Option<bcf::Record>,
 }
 
+// FIXME: manual Send/Sync impl. Sound because RecordBuffer owns its Reader exclusively and Record/Arc<HeaderView> are Send+Sync, but this should be verified if the struct changes.
 unsafe impl Sync for RecordBuffer {}
+// FIXME: manual Send/Sync impl. Sound because RecordBuffer owns its Reader exclusively and Record/Arc<HeaderView> are Send+Sync, but this should be verified if the struct changes.
 unsafe impl Send for RecordBuffer {}
 
 impl RecordBuffer {

@@ -255,8 +255,10 @@ pub trait Read: Sized {
 
     /// Seek to the given virtual offset in the file
     fn seek(&mut self, offset: i64) -> Result<()> {
+        // SAFETY: htsfile pointer is valid for the lifetime of Self.
         let htsfile = unsafe { self.htsfile().as_ref() }.expect("bug: null pointer to htsFile");
         let ret = match htsfile.format.format {
+            // SAFETY: for CRAM files, fp.cram is the active union member.
             htslib::htsExactFormat_cram => unsafe {
                 i64::from(htslib::cram_seek(
                     htsfile.fp.cram,
@@ -264,6 +266,7 @@ pub trait Read: Sized {
                     libc::SEEK_SET,
                 ))
             },
+            // SAFETY: for BAM/SAM files, fp.bgzf is the active union member.
             _ => unsafe { htslib::bgzf_seek(htsfile.fp.bgzf, offset, libc::SEEK_SET) },
         };
 
@@ -277,7 +280,9 @@ pub trait Read: Sized {
     /// Report the current virtual offset
     fn tell(&self) -> i64 {
         // this reimplements the bgzf_tell macro
+        // SAFETY: htsfile pointer is valid for the lifetime of Self.
         let htsfile = unsafe { self.htsfile().as_ref() }.expect("bug: null pointer to htsFile");
+        // SAFETY: fp.bgzf is the active union member for BAM/SAM files (the only format supporting tell).
         let bgzf = unsafe { *htsfile.fp.bgzf };
         (bgzf.block_address << 16) | (i64::from(bgzf.block_offset) & 0xFFFF)
     }
@@ -292,6 +297,7 @@ pub trait Read: Sized {
     ///
     /// * `n_threads` - number of extra background writer threads to use, must be `> 0`.
     fn set_threads(&mut self, n_threads: usize) -> Result<()> {
+        // SAFETY: self.htsfile() is non-null (from constructor).
         unsafe { set_threads(self.htsfile(), n_threads) }
     }
 
@@ -320,6 +326,7 @@ pub trait Read: Sized {
     ///             hts_sys::sam_fields_SAM_RNAME | hts_sys::sam_fields_SAM_FLAG).unwrap();
     /// ```
     fn set_cram_options(&mut self, fmt_opt: hts_fmt_option, fields: sam_fields) -> Result<()> {
+        // SAFETY: self.htsfile() is non-null (from constructor); passing valid option enum and field bitmask.
         unsafe {
             if hts_sys::hts_set_opt(self.htsfile(), fmt_opt, fields) != 0 {
                 Err(Error::HtsSetOpt)
@@ -338,6 +345,7 @@ pub struct Reader {
     tpool: Option<ThreadPool>,
 }
 
+// SAFETY: Reader owns its htsFile and header pointers; no shared mutable state.
 unsafe impl Send for Reader {}
 
 impl Reader {
@@ -375,6 +383,7 @@ impl Reader {
     fn new(path: &[u8]) -> Result<Self> {
         let htsfile = hts_open(path, b"r")?;
 
+        // SAFETY: htsfile is non-null (checked by hts_open above); sam_hdr_read returns null on failure.
         let header = unsafe { htslib::sam_hdr_read(htsfile) };
         if header.is_null() {
             return Err(BamError::Open {
@@ -383,6 +392,7 @@ impl Reader {
         }
 
         // Invalidate the `text` representation of the header
+        // SAFETY: header is non-null (checked above); forces htslib to rebuild text from parsed data.
         unsafe {
             let _ = htslib::sam_hdr_line_name(header, b"SQ".as_ptr().cast::<c_char>(), 0);
         }
@@ -402,6 +412,7 @@ impl Reader {
         // holds a `&mut Self` borrow for the lifetime of the `Pileups` iterator.
         // The pointer is therefore non-null and exclusively owned for this call.
         let this = unsafe { &mut *(data as *mut Self) };
+        // SAFETY: self.htsfile and header are non-null (from constructor); record provided by htslib.
         unsafe {
             htslib::sam_read1(
                 this.htsfile(),
@@ -434,6 +445,7 @@ impl Reader {
     ///
     /// * `path` - path to the FASTA reference
     pub fn set_reference<P: AsRef<Path>>(&mut self, path: P) -> Result<()> {
+        // SAFETY: self.htsfile is non-null (from constructor).
         unsafe { set_fai_filename(self.htsfile, path) }
     }
 }
@@ -466,6 +478,7 @@ impl Read for Reader {
     /// # Ok::<(), Error>(())
     /// ```
     fn read(&mut self, record: &mut record::Record) -> Option<Result<()>> {
+        // SAFETY: self.htsfile and header are non-null (from constructor); record pointer is valid.
         match unsafe {
             htslib::sam_read1(
                 self.htsfile,
@@ -501,6 +514,7 @@ impl Read for Reader {
 
     fn pileup(&mut self) -> pileup::Pileups<'_, Self> {
         let _self = self as *const Self;
+        // FIXME: casting &mut Self to *mut c_void for htslib callback. Safe only if htslib does not mutate through this pointer; the borrow checker cannot enforce this across FFI.
         let itr = unsafe {
             htslib::bam_plp_init(
                 Some(Reader::pileup_read),
@@ -519,6 +533,7 @@ impl Read for Reader {
     }
 
     fn set_thread_pool(&mut self, tpool: &ThreadPool) -> Result<()> {
+        // SAFETY: self.htsfile() is non-null (from constructor).
         unsafe { set_thread_pool(self.htsfile(), tpool)? }
         self.tpool = Some(tpool.clone());
         Ok(())
@@ -527,6 +542,7 @@ impl Read for Reader {
 
 impl Drop for Reader {
     fn drop(&mut self) {
+        // SAFETY: self.htsfile was allocated by hts_open in constructor; hts_close is symmetric.
         unsafe {
             htslib::hts_close(self.htsfile);
         }
@@ -706,6 +722,7 @@ impl fmt::Debug for IndexedReader {
     }
 }
 
+// SAFETY: IndexedReader owns its htsFile, header, index, and iterator pointers; no shared mutable state.
 unsafe impl Send for IndexedReader {}
 
 impl IndexedReader {
@@ -754,10 +771,12 @@ impl IndexedReader {
     /// * `path` - the path. Use "-" for stdin.
     fn new(path: &[u8]) -> Result<Self> {
         let htsfile = hts_open(path, b"r")?;
+        // SAFETY: htsfile is non-null (from hts_open); sam_hdr_read returns null on failure.
         let header = unsafe { htslib::sam_hdr_read(htsfile) };
         let c_str = ffi::CString::new(path).map_err(|_| BamError::Open {
             target: String::from_utf8_lossy(path).into_owned(),
         })?;
+        // SAFETY: htsfile and c_str are valid; returns null if index not found (checked below).
         let idx = unsafe { htslib::sam_index_load(htsfile, c_str.as_ptr()) };
         if idx.is_null() {
             Err(BamError::InvalidIndex {
@@ -782,6 +801,7 @@ impl IndexedReader {
     /// * `index_path` - the index path to use
     fn new_with_index_path(path: &[u8], index_path: &[u8]) -> Result<Self> {
         let htsfile = hts_open(path, b"r")?;
+        // SAFETY: htsfile is non-null (from hts_open); sam_hdr_read returns null on failure.
         let header = unsafe { htslib::sam_hdr_read(htsfile) };
         let c_str_path = ffi::CString::new(path).map_err(|_| BamError::Open {
             target: String::from_utf8_lossy(path).into_owned(),
@@ -789,6 +809,7 @@ impl IndexedReader {
         let c_str_index_path = ffi::CString::new(index_path).map_err(|_| BamError::Open {
             target: String::from_utf8_lossy(index_path).into_owned(),
         })?;
+        // SAFETY: htsfile and CStrings are valid; returns null if index not found (checked below).
         let idx = unsafe {
             htslib::sam_index_load2(htsfile, c_str_path.as_ptr(), c_str_index_path.as_ptr())
         };
@@ -885,8 +906,10 @@ impl IndexedReader {
 
     fn _fetch_by_coord_tuple(&mut self, tid: i32, beg: i64, end: i64) -> Result<()> {
         if let Some(itr) = self.itr {
+            // SAFETY: itr was allocated by sam_itr_queryi/querys; hts_itr_destroy is symmetric.
             unsafe { htslib::hts_itr_destroy(itr) }
         }
+        // SAFETY: index pointer is non-null (checked in constructor); returns null on failure.
         let itr = unsafe { htslib::sam_itr_queryi(self.index().inner_ptr(), tid, beg, end) };
         if itr.is_null() {
             self.itr = None;
@@ -899,10 +922,12 @@ impl IndexedReader {
 
     fn _fetch_by_str(&mut self, region: &[u8]) -> Result<()> {
         if let Some(itr) = self.itr {
+            // SAFETY: itr was allocated by sam_itr_queryi/querys; hts_itr_destroy is symmetric.
             unsafe { htslib::hts_itr_destroy(itr) }
         }
         let rstr = ffi::CString::new(region).unwrap();
         let rptr = rstr.as_ptr();
+        // SAFETY: index and header pointers are non-null (from constructor); rptr is a valid CString.
         let itr = unsafe {
             htslib::sam_itr_querys(
                 self.index().inner_ptr(),
@@ -930,6 +955,7 @@ impl IndexedReader {
         loop {
             let ret = match this.itr {
                 Some(itr) => itr_next(this.htsfile, itr, record), // read fetched region
+                // SAFETY: self.htsfile and header are non-null (from constructor); record provided by htslib.
                 None => unsafe {
                     htslib::sam_read1(
                         this.htsfile,
@@ -944,6 +970,7 @@ impl IndexedReader {
             match &mut this.pileup_filter {
                 None => return ret,
                 Some(f) => {
+                    // SAFETY: record is non-null (provided by htslib pileup engine).
                     if f(unsafe { &*record }) {
                         return ret; // record passes filter
                     }
@@ -959,6 +986,7 @@ impl IndexedReader {
     ///
     /// * `path` - path to the FASTA reference
     pub fn set_reference<P: AsRef<Path>>(&mut self, path: P) -> Result<()> {
+        // SAFETY: self.htsfile is non-null (from constructor).
         unsafe { set_fai_filename(self.htsfile, path) }
     }
 
@@ -975,6 +1003,7 @@ impl IndexedReader {
         F: FnMut(record::RecordView<'_>) -> bool + Send + 'static,
     {
         self.pileup_filter = Some(Box::new(move |b: &htslib::bam1_t| {
+            // SAFETY: b is a valid reference to a bam1_t from the pileup callback.
             let view = unsafe { record::RecordView::from_raw(b as *const htslib::bam1_t) };
             filter(view)
         }));
@@ -1008,6 +1037,7 @@ impl IndexedReader {
             return Ok(vec![]);
         }
         let mut counts = vec![vec![0; 2]; nref + 1];
+        // SAFETY: bam1_t is a C struct where all-zeros is a valid initial state.
         let mut bb: hts_sys::bam1_t = MaybeUninit::zeroed().assume_init();
         let b = &mut bb as *mut hts_sys::bam1_t;
         loop {
@@ -1064,6 +1094,7 @@ impl IndexedReader {
             panic!("Index is null");
         }
         // the quick index stats method only works for BAM files, not SAM or CRAM
+        // SAFETY: self.htsfile is non-null (from constructor); reading format field.
         unsafe {
             if (*self.htsfile()).format.format != htslib::htsExactFormat_bam {
                 return self.slow_idxstats();
@@ -1085,6 +1116,7 @@ pub struct IndexView {
     inner: *mut hts_sys::hts_idx_t,
 }
 
+// SAFETY: IndexView owns its hts_idx_t pointer; the index data is read-only after construction.
 unsafe impl Send for IndexView {}
 unsafe impl Sync for IndexView {}
 
@@ -1095,6 +1127,7 @@ impl IndexView {
 
     #[inline]
     pub fn inner(&self) -> &hts_sys::hts_idx_t {
+        // SAFETY: self.inner is non-null (from constructor, which checks for null index).
         unsafe { self.inner.as_ref().unwrap() }
     }
 
@@ -1106,6 +1139,7 @@ impl IndexView {
 
     #[inline]
     pub fn inner_mut(&mut self) -> &mut hts_sys::hts_idx_t {
+        // SAFETY: self.inner is non-null (from constructor); &mut self ensures exclusive access.
         unsafe { self.inner.as_mut().unwrap() }
     }
 
@@ -1119,6 +1153,7 @@ impl IndexView {
     /// FIXME only valid for BAM, not SAM/CRAM
     fn number_mapped_unmapped(&self, tid: u32) -> (u64, u64) {
         let (mut mapped, mut unmapped) = (0, 0);
+        // SAFETY: self.inner is non-null (from constructor); tid is within range (caller checks).
         unsafe {
             hts_sys::hts_idx_get_stat(self.inner, tid as i32, &mut mapped, &mut unmapped);
         }
@@ -1128,12 +1163,14 @@ impl IndexView {
     /// Get the total number of unmapped reads in the file
     /// FIXME only valid for BAM, not SAM/CRAM
     fn number_unmapped(&self) -> u64 {
+        // SAFETY: self.inner is non-null (from constructor).
         unsafe { hts_sys::hts_idx_get_n_no_coor(self.inner) }
     }
 }
 
 impl Drop for IndexView {
     fn drop(&mut self) {
+        // SAFETY: self.inner was allocated by sam_index_load/load2; hts_idx_destroy is symmetric.
         unsafe {
             htslib::hts_idx_destroy(self.inner);
         }
@@ -1176,6 +1213,7 @@ impl Read for IndexedReader {
 
     fn pileup(&mut self) -> pileup::Pileups<'_, Self> {
         let _self = self as *const Self;
+        // FIXME: casting &mut Self to *mut c_void for htslib callback. Safe only if htslib does not mutate through this pointer; the borrow checker cannot enforce this across FFI.
         let itr = unsafe {
             htslib::bam_plp_init(
                 Some(IndexedReader::pileup_read),
@@ -1194,6 +1232,7 @@ impl Read for IndexedReader {
     }
 
     fn set_thread_pool(&mut self, tpool: &ThreadPool) -> Result<()> {
+        // SAFETY: self.htsfile() is non-null (from constructor).
         unsafe { set_thread_pool(self.htsfile(), tpool)? }
         self.tpool = Some(tpool.clone());
         Ok(())
@@ -1202,6 +1241,7 @@ impl Read for IndexedReader {
 
 impl Drop for IndexedReader {
     fn drop(&mut self) {
+        // SAFETY: itr allocated by sam_itr_queryi/querys; htsfile by hts_open. Destroy functions are symmetric.
         unsafe {
             if let Some(itr) = self.itr {
                 htslib::hts_itr_destroy(itr);
@@ -1236,6 +1276,7 @@ pub struct Writer {
     tpool: Option<ThreadPool>,
 }
 
+// SAFETY: Writer owns its htsFile and header pointers; no shared mutable state.
 unsafe impl Send for Writer {}
 
 impl Writer {
@@ -1282,6 +1323,7 @@ impl Writer {
         // This causes non-SQ headers to be dropped in the output BAM file.
         // To avoid this, we copy the All header to a new C-string that is allocated with malloc,
         // and set this into header_record manually.
+        // FIXME: manually malloc'd header text is transferred to htslib. Relies on sam_hdr_destroy() freeing text -- verify this invariant in htslib source.
         let header_record = unsafe {
             let mut header_string = header.to_bytes();
             if !header_string.is_empty() && header_string[header_string.len() - 1] != b'\n' {
@@ -1304,6 +1346,7 @@ impl Writer {
             rec
         };
 
+        // SAFETY: f is non-null (from hts_open); header_record is valid (from sam_hdr_parse above).
         unsafe {
             htslib::sam_hdr_write(f, header_record);
         }
@@ -1322,6 +1365,7 @@ impl Writer {
     ///
     /// * `n_threads` - number of extra background writer threads to use, must be `> 0`.
     pub fn set_threads(&mut self, n_threads: usize) -> Result<()> {
+        // SAFETY: self.f is non-null (from constructor).
         unsafe { set_threads(self.f, n_threads) }
     }
 
@@ -1333,6 +1377,7 @@ impl Writer {
     ///
     /// * `tpool` - thread pool to use for compression work.
     pub fn set_thread_pool(&mut self, tpool: &ThreadPool) -> Result<()> {
+        // SAFETY: self.f is non-null (from constructor).
         unsafe { set_thread_pool(self.f, tpool)? }
         self.tpool = Some(tpool.clone());
         Ok(())
@@ -1344,6 +1389,7 @@ impl Writer {
     ///
     /// * `record` - the record to write
     pub fn write(&mut self, record: &record::Record) -> Result<()> {
+        // SAFETY: self.f and header are non-null (from constructor); record pointer is valid.
         if unsafe { htslib::sam_write1(self.f, self.header.inner(), record.inner_ptr()) } == -1 {
             Err(Error::WriteRecord)
         } else {
@@ -1362,6 +1408,7 @@ impl Writer {
     ///
     /// * `path` - path to the FASTA reference
     pub fn set_reference<P: AsRef<Path>>(&mut self, path: P) -> Result<()> {
+        // SAFETY: self.f is non-null (from constructor).
         unsafe { set_fai_filename(self.f, path) }
     }
 
@@ -1372,6 +1419,7 @@ impl Writer {
     /// * `compression_level` - `CompressionLevel` enum variant
     pub fn set_compression_level(&mut self, compression_level: CompressionLevel) -> Result<()> {
         let level = compression_level.convert()?;
+        // SAFETY: self.f is non-null (from constructor); passing valid compression level.
         match unsafe {
             htslib::hts_set_opt(
                 self.f,
@@ -1414,6 +1462,7 @@ impl CompressionLevel {
 
 impl Drop for Writer {
     fn drop(&mut self) {
+        // SAFETY: self.f was allocated by hts_open in constructor; hts_close is symmetric.
         unsafe {
             htslib::hts_close(self.f);
         }
@@ -1499,6 +1548,7 @@ fn hts_open(path: &[u8], mode: &[u8]) -> Result<*mut htslib::htsFile> {
     })?;
     let path = str::from_utf8(path).unwrap();
     let c_str = ffi::CString::new(mode).unwrap();
+    // SAFETY: cpath and c_str are valid CStrings; hts_open returns null on failure (checked below).
     let ret = unsafe { htslib::hts_open(cpath.as_ptr(), c_str.as_ptr()) };
     if ret.is_null() {
         Err(BamError::Open {
@@ -1506,6 +1556,7 @@ fn hts_open(path: &[u8], mode: &[u8]) -> Result<*mut htslib::htsFile> {
         })
     } else {
         if !mode.contains(&b'w') {
+            // SAFETY: ret is non-null (checked above); reading format field to validate file type.
             unsafe {
                 // Comparison against 'htsFormatCategory_sequence_data' doesn't handle text files correctly
                 // hence the explicit checks against all supported exact formats
@@ -1529,6 +1580,7 @@ fn itr_next(
     itr: *mut htslib::hts_itr_t,
     record: *mut htslib::bam1_t,
 ) -> i32 {
+    // FIXME: accesses (*htsfile).fp.bgzf union member. Safe only for BAM/SAM files; would be UB for CRAM. Callers (IndexedReader) validate format at open time.
     unsafe {
         htslib::hts_itr_next(
             (*htsfile).fp.bgzf,
@@ -1544,6 +1596,7 @@ pub struct HeaderView {
     inner: *mut htslib::bam_hdr_t,
 }
 
+// SAFETY: HeaderView owns its bam_hdr_t pointer; header data is read-only after construction.
 unsafe impl Send for HeaderView {}
 unsafe impl Sync for HeaderView {}
 
@@ -1559,6 +1612,7 @@ impl HeaderView {
 
     /// Create a new HeaderView from bytes
     pub fn from_bytes(header_string: &[u8]) -> Self {
+        // FIXME: manually malloc'd header text is transferred to htslib. Relies on sam_hdr_destroy() freeing text -- verify this invariant in htslib source.
         let header_record = unsafe {
             let l_text = header_string.len();
             let text = ::libc::malloc(l_text + 1);
@@ -1585,6 +1639,7 @@ impl HeaderView {
 
     #[inline]
     pub fn inner(&self) -> &htslib::bam_hdr_t {
+        // SAFETY: self.inner is non-null (from constructor or sam_hdr_read).
         unsafe { self.inner.as_ref().unwrap() }
     }
 
@@ -1596,6 +1651,7 @@ impl HeaderView {
 
     #[inline]
     pub fn inner_mut(&mut self) -> &mut htslib::bam_hdr_t {
+        // SAFETY: self.inner is non-null (from constructor); &mut self ensures exclusive access.
         unsafe { self.inner.as_mut().unwrap() }
     }
 
@@ -1607,6 +1663,7 @@ impl HeaderView {
 
     pub fn tid(&self, name: &[u8]) -> Option<u32> {
         let c_str = ffi::CString::new(name).expect("Expected valid name.");
+        // SAFETY: self.inner is non-null (from constructor); c_str is a valid CString.
         let tid = unsafe { htslib::sam_hdr_name2tid(self.inner, c_str.as_ptr()) };
         if tid < 0 {
             None
@@ -1618,10 +1675,12 @@ impl HeaderView {
     pub fn tid2name(&self, tid: u32) -> Result<&[u8]> {
         // sam_hdr_tid2name returns NULL for out-of-bounds tids.
         // CStr::from_ptr on NULL is UB, so we must check first.
+        // SAFETY: self.inner is non-null (from constructor).
         let ptr = unsafe { htslib::sam_hdr_tid2name(self.inner, tid as i32) };
         if ptr.is_null() {
             return Err(Error::InvalidTid { tid: tid as i32 });
         }
+        // SAFETY: ptr is non-null (checked above); points to a NUL-terminated C string owned by the header.
         Ok(unsafe { ffi::CStr::from_ptr(ptr).to_bytes() })
     }
 
@@ -1630,18 +1689,22 @@ impl HeaderView {
     }
 
     pub fn target_names(&self) -> Vec<&[u8]> {
+        // SAFETY: target_name points to an array of n_targets NUL-terminated C strings owned by the header.
         let names = unsafe {
             slice::from_raw_parts(self.inner().target_name, self.target_count() as usize)
         };
         names
             .iter()
+            // SAFETY: each name pointer is non-null and NUL-terminated (populated by htslib header parsing).
             .map(|name| unsafe { ffi::CStr::from_ptr(*name).to_bytes() })
             .collect()
     }
 
     pub fn target_len(&self, tid: u32) -> Option<u64> {
+        // SAFETY: self.inner is non-null (from constructor).
         let inner = unsafe { *self.inner };
         if (tid as i32) < inner.n_targets {
+            // SAFETY: target_len points to an array of n_targets u32 values owned by the header.
             let l: &[u32] =
                 unsafe { slice::from_raw_parts(inner.target_len, inner.n_targets as usize) };
             Some(l[tid as usize] as u64)
@@ -1652,11 +1715,13 @@ impl HeaderView {
 
     /// Retrieve the textual SAM header as bytes
     pub fn as_bytes(&self) -> &[u8] {
+        // SAFETY: self.inner is non-null (from constructor); sam_hdr_str returns null-terminated string or null.
         unsafe {
             let rebuilt_hdr = htslib::sam_hdr_str(self.inner);
             if rebuilt_hdr.is_null() {
                 return b"";
             }
+            // SAFETY: rebuilt_hdr is non-null (checked above) and NUL-terminated.
             ffi::CStr::from_ptr(rebuilt_hdr).to_bytes()
         }
     }
@@ -1665,6 +1730,7 @@ impl HeaderView {
 impl Clone for HeaderView {
     fn clone(&self) -> Self {
         HeaderView {
+            // SAFETY: self.inner is non-null (from constructor); sam_hdr_dup deep-copies the header.
             inner: unsafe { htslib::sam_hdr_dup(self.inner) },
         }
     }
@@ -1672,6 +1738,7 @@ impl Clone for HeaderView {
 
 impl Drop for HeaderView {
     fn drop(&mut self) {
+        // SAFETY: self.inner was allocated by sam_hdr_read/sam_hdr_parse/sam_hdr_dup; sam_hdr_destroy is symmetric.
         unsafe {
             htslib::sam_hdr_destroy(self.inner);
         }

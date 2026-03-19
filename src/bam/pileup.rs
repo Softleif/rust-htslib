@@ -48,6 +48,7 @@ impl Pileup {
     }
 
     fn inner(&self) -> &[htslib::bam_pileup1_t] {
+        // SAFETY: self.inner is set by bam_plp_auto (non-null when depth > 0); length comes from depth.
         unsafe {
             slice::from_raw_parts(
                 self.inner as *mut htslib::bam_pileup1_t,
@@ -160,6 +161,7 @@ impl<'a, R: bam::Read> Pileups<'a, R> {
             )
         }
         let intdepth = depth as i32;
+        // SAFETY: self.itr is non-null (from bam_plp_init in pileup constructor).
         unsafe {
             htslib::bam_plp_set_maxcnt(self.itr, intdepth);
         }
@@ -172,6 +174,7 @@ impl<R: bam::Read> Iterator for Pileups<'_, R> {
     #[allow(clippy::match_bool)]
     fn next(&mut self) -> Option<Result<Pileup>> {
         let (mut tid, mut pos, mut depth) = (0i32, 0i32, 0i32);
+        // SAFETY: self.itr is non-null (from bam_plp_init); output pointers are valid stack references.
         let inner = unsafe { htslib::bam_plp_auto(self.itr, &mut tid, &mut pos, &mut depth) };
 
         match inner.is_null() {
@@ -189,6 +192,7 @@ impl<R: bam::Read> Iterator for Pileups<'_, R> {
 
 impl<R: bam::Read> Drop for Pileups<'_, R> {
     fn drop(&mut self) {
+        // SAFETY: self.itr was allocated by bam_plp_init; bam_plp_destroy is symmetric.
         unsafe {
             htslib::bam_plp_reset(self.itr);
             htslib::bam_plp_destroy(self.itr);

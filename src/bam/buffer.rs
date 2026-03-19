@@ -28,6 +28,7 @@ pub struct RecordBuffer {
     start_pos: Option<u64>,
 }
 
+// SAFETY: RecordBuffer owns all its data (IndexedReader, VecDeque<Arc<Record>>); no shared mutable state.
 unsafe impl Sync for RecordBuffer {}
 unsafe impl Send for RecordBuffer {}
 

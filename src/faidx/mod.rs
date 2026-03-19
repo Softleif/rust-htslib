@@ -62,6 +62,7 @@ fn path_to_cstr8(path: &Path, must_exist: bool) -> Result<CString8, FaidxError> 
 pub fn build<P: AsRef<Path>>(path: P) -> Result<(), FaidxError> {
     let path = path.as_ref();
     let cpath = path_to_cstr8(path, true)?;
+    // SAFETY: cpath is a valid null-terminated CString; return value checked below.
     let rc = unsafe { htslib::fai_build(cpath.as_ptr().cast()) };
     if rc < 0 {
         Err(FaidxError::Build {
@@ -77,6 +78,7 @@ impl Reader {
     pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Self, FaidxError> {
         let path = path.as_ref();
         let cpath = path_to_cstr8(path, true)?;
+        // SAFETY: cpath is a valid null-terminated CString; result is null-checked.
         let inner = unsafe { htslib::fai_load(cpath.as_ptr().cast()) };
         if inner.is_null() {
             // path_to_cstr8 succeeded, so to_string_lossy is lossless here
@@ -93,6 +95,7 @@ impl Reader {
         let cpath = CString8::new(url_str).map_err(|_| FaidxError::Open {
             path: url_str.to_owned(),
         })?;
+        // SAFETY: cpath is a valid null-terminated CString; result is null-checked.
         let inner = unsafe { htslib::fai_load(cpath.as_ptr().cast()) };
         if inner.is_null() {
             return Err(FaidxError::Open {
@@ -116,6 +119,9 @@ impl Reader {
         }
         let cname = CString8::new(name.as_ref()).map_err(|_| FaidxError::NullByteName)?;
         let mut len_out: htslib::hts_pos_t = 0;
+        // SAFETY: self.inner is valid (from constructor null-check); cname is a
+        // valid CString; begin/end validated to fit in i64 above; result ptr and
+        // len_out are checked below.
         let ptr = unsafe {
             htslib::faidx_fetch_seq64(
                 self.inner,
@@ -135,6 +141,10 @@ impl Reader {
         // by htslib's malloc, not Rust's global allocator. If a custom allocator
         // is active (e.g. mimalloc), dropping the Vec would be undefined behavior.
         let len = len_out as usize;
+        // SAFETY: ptr is non-null (checked above), len is non-negative (checked
+        // above). Immediately copied to Vec; ptr is then freed via libc::free
+        // (matching htslib's malloc). Not using Vec::from_raw_parts because ptr
+        // was allocated by htslib, not Rust's global allocator.
         let vec = unsafe { std::slice::from_raw_parts(ptr as *const u8, len) }.to_vec();
         unsafe { libc::free(ptr as *mut libc::c_void) };
         Ok(vec)
@@ -155,6 +165,7 @@ impl Reader {
 
     /// Fetches the number of sequences in the fai index.
     pub fn n_seqs(&self) -> u64 {
+        // SAFETY: self.inner is valid (from constructor null-check).
         let n = unsafe { htslib::faidx_nseq(self.inner) };
         n.max(0) as u64
     }
@@ -166,10 +177,12 @@ impl Reader {
         if i < 0 || (i as u64) >= self.n_seqs() {
             return Err(FaidxError::InvalidSequenceName { index: i });
         }
+        // SAFETY: index bounds-checked above; self.inner is valid. Result null-checked.
         let ptr = unsafe { htslib::faidx_iseq(self.inner, i) };
         if ptr.is_null() {
             return Err(FaidxError::InvalidSequenceName { index: i });
         }
+        // SAFETY: ptr is non-null (checked above); htslib guarantees a valid C string.
         let cname = unsafe { std::ffi::CStr::from_ptr(ptr) };
         cname
             .to_str()
@@ -182,6 +195,7 @@ impl Reader {
     /// Returns `None` if the sequence is not found in the index.
     pub fn fetch_seq_len<N: AsRef<str>>(&self, name: N) -> Option<u64> {
         let cname = CString8::new(name.as_ref()).ok()?;
+        // SAFETY: self.inner is valid; cname is a valid CString; return checked.
         let seq_len = unsafe { htslib::faidx_seq_len64(self.inner, cname.as_ptr().cast()) };
         if seq_len < 0 {
             None
@@ -211,12 +225,15 @@ impl Reader {
 
 impl Drop for Reader {
     fn drop(&mut self) {
+        // SAFETY: self.inner was allocated by fai_load; fai_destroy is symmetric.
         unsafe {
             htslib::fai_destroy(self.inner);
         }
     }
 }
 
+// SAFETY: Reader owns its faidx_t exclusively; htslib faidx operations are
+// not tied to a particular thread.
 unsafe impl Send for Reader {}
 
 #[cfg(test)]

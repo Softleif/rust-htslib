@@ -43,6 +43,7 @@ fn path_as_bytes<'a, P: 'a + AsRef<Path>>(path: P, must_exist: bool) -> Result<V
 pub fn is_bgzip<P: AsRef<Path>>(path: P) -> Result<bool, Error> {
     let byte_path = path_as_bytes(path, true)?;
     let cpath = ffi::CString::new(byte_path).unwrap();
+    // SAFETY: cpath is a valid null-terminated CString.
     let is_bgzf = unsafe { htslib::bgzf_is_bgzf(cpath.as_ptr()) == 1 };
     Ok(is_bgzf)
 }
@@ -86,6 +87,7 @@ impl Reader {
     fn new(path: &[u8]) -> Result<Self, Error> {
         let mode = ffi::CString::new("r").unwrap();
         let cpath = ffi::CString::new(path).unwrap();
+        // SAFETY: cpath and mode are valid CStrings; result is null-checked.
         let inner = unsafe { htslib::bgzf_open(cpath.as_ptr(), mode.as_ptr()) };
         if !inner.is_null() {
             Ok(Self { inner })
@@ -103,6 +105,7 @@ impl Reader {
     /// * `tpool` - the thread-pool to use
     pub fn set_thread_pool(&mut self, tpool: &ThreadPool) -> Result<()> {
         let b = tpool.handle.borrow_mut();
+        // SAFETY: self.inner is non-null (from constructor); pool ptr is valid.
         let r = unsafe {
             htslib::bgzf_thread_pool(self.inner, b.inner.pool as *mut _, 0) // let htslib decide on the queue-size
         };
@@ -117,6 +120,7 @@ impl Reader {
 
 impl std::io::Read for Reader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        // SAFETY: self.inner is non-null; buf is a valid mutable slice.
         let nbytes = unsafe {
             htslib::bgzf_read(self.inner, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
         };
@@ -213,6 +217,7 @@ impl Writer {
     fn new(path: &[u8], level: CompressionLevel) -> Result<Self, Error> {
         let mode = Self::get_open_mode(level)?;
         let cpath = ffi::CString::new(path).unwrap();
+        // SAFETY: cpath and mode are valid CStrings; result is null-checked.
         let inner = unsafe { htslib::bgzf_open(cpath.as_ptr(), mode.as_ptr()) };
         if !inner.is_null() {
             Ok(Self { inner, tpool: None })
@@ -248,6 +253,7 @@ impl Writer {
     pub fn set_thread_pool(&mut self, tpool: &ThreadPool) -> Result<()> {
         self.tpool = Some(tpool.clone());
         let b = tpool.handle.borrow_mut();
+        // SAFETY: self.inner is non-null (from constructor); pool ptr is valid.
         let r = unsafe {
             htslib::bgzf_thread_pool(self.inner, b.inner.pool as *mut _, 0) // let htslib decide on the queue-size
         };
@@ -262,6 +268,7 @@ impl Writer {
 
 impl std::io::Write for Writer {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // SAFETY: self.inner is non-null; buf is a valid slice.
         let nbytes =
             unsafe { htslib::bgzf_write(self.inner, buf.as_ptr() as *mut libc::c_void, buf.len()) };
         if nbytes < 0 {
@@ -272,6 +279,7 @@ impl std::io::Write for Writer {
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
+        // SAFETY: self.inner is non-null.
         let exit_code: i32 = unsafe { htslib::bgzf_flush(self.inner) };
         if exit_code == 0 {
             Ok(())
@@ -283,6 +291,7 @@ impl std::io::Write for Writer {
 
 impl std::ops::Drop for Writer {
     fn drop(&mut self) {
+        // SAFETY: self.inner was allocated by bgzf_open; bgzf_close is symmetric.
         unsafe {
             htslib::bgzf_close(self.inner);
         }

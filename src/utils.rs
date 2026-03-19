@@ -23,8 +23,8 @@ pub fn copy_memory(src: &[u8], dst: &mut [u8]) {
         dst.len(),
         src.len()
     );
-    // `dst` is unaliasable, so we know statically it doesn't overlap
-    // with `src`.
+    // SAFETY: src and dst are valid slices; len_src <= dst.len() (asserted
+    // above); dst is &mut so it cannot alias src.
     unsafe {
         ptr::copy_nonoverlapping(src.as_ptr(), dst.as_mut_ptr(), len_src);
     }

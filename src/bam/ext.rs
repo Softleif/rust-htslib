@@ -411,6 +411,7 @@ impl BamRecordExtensions for bam::Record {
     /// Calculate the rightmost absolute reference base position of an alignment on the reference genome.
     /// Returns the coordinate of the first base after the alignment (0-based).
     fn reference_end(&self) -> i64 {
+        // SAFETY: self.inner_ptr() points to a valid bam1_t owned by the Record.
         unsafe { htslib::bam_endpos(self.inner_ptr()) }
     }
 

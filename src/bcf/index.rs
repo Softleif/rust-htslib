@@ -77,6 +77,7 @@ pub fn build<P: AsRef<std::path::Path>>(
             bcf_path.as_ref().display()
         ),
     })?;
+    // SAFETY: bcf_path is a valid CString; idx_path_cstr is either null or a valid CString.
     let return_code = unsafe {
         htslib::bcf_index_build3(
             bcf_path.as_ptr(),

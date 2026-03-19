@@ -1834,6 +1834,19 @@ impl<'a> Iterator for AuxIter<'a> {
 }
 
 static DECODE_BASE: &[u8] = b"=ACMGRSVTWYHKDBN";
+
+/// Lookup table: maps each packed byte to its two decoded ASCII bases.
+/// `DECODE_PAIR[byte] = [high_nibble_base, low_nibble_base]`
+static DECODE_PAIR: [[u8; 2]; 256] = {
+    const BASE: [u8; 16] = *b"=ACMGRSVTWYHKDBN";
+    let mut table = [[0u8; 2]; 256];
+    let mut i = 0;
+    while i < 256 {
+        table[i] = [BASE[i >> 4], BASE[i & 0xf]];
+        i += 1;
+    }
+    table
+};
 static ENCODE_BASE: [u8; 256] = [
     15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
     15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
@@ -1901,7 +1914,25 @@ impl Seq<'_> {
 
     /// Return decoded sequence. Complexity: O(m) with m being the read length.
     pub fn as_bytes(&self) -> Vec<u8> {
-        (0..self.len()).map(|i| self[i]).collect()
+        let full_bytes = self.len / 2;
+        let mut result = vec![0u8; self.len];
+
+        // Process full bytes: 2 bases each via precomputed pair lookup
+        for (chunk, &byte) in result[..full_bytes * 2]
+            .chunks_exact_mut(2)
+            .zip(&self.encoded[..full_bytes])
+        {
+            let pair = DECODE_PAIR[byte as usize];
+            chunk[0] = pair[0];
+            chunk[1] = pair[1];
+        }
+
+        // Handle trailing base if odd length
+        if self.len % 2 == 1 {
+            result[self.len - 1] = DECODE_PAIR[self.encoded[full_bytes] as usize][0];
+        }
+
+        result
     }
 
     /// Return length (in bases) of the sequence.
@@ -3673,56 +3704,169 @@ mod proptests {
     use super::*;
     use proptest::prelude::*;
 
+    /// The 16 valid BAM-encodable bases (IUPAC + '=').
+    const VALID_BASES: &[u8] = b"=ACMGRSVTWYHKDBN";
+
     /// Reference implementation: decode one base at a time using the original
-    /// per-base logic. Used to verify the optimized `as_bytes()`.
-    fn as_bytes_reference(seq: &Seq<'_>) -> Vec<u8> {
+    /// per-base nibble-extraction logic.
+    fn as_bytes_naive(seq: &Seq<'_>) -> Vec<u8> {
         (0..seq.len())
             .map(|i| *decode_base_unchecked(encoded_base(seq.encoded, i)))
             .collect()
     }
 
-    /// Strategy that generates a valid (encoded, len) pair for Seq.
-    /// `len` is the number of bases (1..=512), and `encoded` is the
-    /// packed byte array with ceil(len/2) bytes, each nibble in 0..16.
-    fn seq_strategy() -> impl Strategy<Value = (Vec<u8>, usize)> {
-        (1usize..=512).prop_flat_map(|len| {
+    /// Pack ASCII bases into BAM 4-bit encoding (same logic as Record::set).
+    fn encode_bases(bases: &[u8]) -> Vec<u8> {
+        let mut encoded = vec![0u8; (bases.len() + 1) / 2];
+        for (j, chunk) in bases.chunks(2).enumerate() {
+            encoded[j] = ENCODE_BASE[chunk[0] as usize] << 4
+                | if chunk.len() == 2 {
+                    ENCODE_BASE[chunk[1] as usize]
+                } else {
+                    0
+                };
+        }
+        encoded
+    }
+
+    // -- Strategies --
+
+    /// Random packed bytes with a random base count. Exercises the full
+    /// nibble space (0..16) including ambiguity codes that real BAM data
+    /// might not contain.
+    fn raw_seq_strategy() -> impl Strategy<Value = (Vec<u8>, usize)> {
+        (0usize..=512).prop_flat_map(|len| {
             let n_bytes = (len + 1) / 2;
             (proptest::collection::vec(any::<u8>(), n_bytes), Just(len))
         })
     }
 
+    /// Random sequence of valid ASCII bases (like "ACGTNN=").
+    /// More realistic than raw bytes — these are the strings a caller
+    /// would pass to Record::set.
+    fn ascii_bases_strategy() -> impl Strategy<Value = Vec<u8>> {
+        proptest::collection::vec(proptest::sample::select(VALID_BASES), 0..=512)
+    }
+
     proptest! {
+        /// The optimized `as_bytes()` must produce identical output to
+        /// the naive per-base decoder for arbitrary packed data.
         #[test]
-        fn as_bytes_matches_reference((encoded, len) in seq_strategy()) {
+        fn as_bytes_matches_naive((encoded, len) in raw_seq_strategy()) {
             let seq = Seq { encoded: &encoded, len };
-            prop_assert_eq!(seq.as_bytes(), as_bytes_reference(&seq));
+            prop_assert_eq!(seq.as_bytes(), as_bytes_naive(&seq));
         }
 
+        /// `Seq::get(i)` must agree with `seq[i]` for valid indices and
+        /// return `None` for out-of-bounds.
         #[test]
-        fn get_matches_index((encoded, len) in seq_strategy()) {
+        fn get_matches_index((encoded, len) in raw_seq_strategy()) {
             let seq = Seq { encoded: &encoded, len };
             for i in 0..len {
                 prop_assert_eq!(seq.get(i), Some(seq[i]));
             }
             prop_assert_eq!(seq.get(len), None);
-            prop_assert_eq!(seq.get(len + 1), None);
+            prop_assert_eq!(seq.get(usize::MAX), None);
         }
 
+        /// Every byte produced by `as_bytes()` must be one of the 16
+        /// valid BAM base characters.
         #[test]
-        fn as_bytes_only_contains_valid_bases((encoded, len) in seq_strategy()) {
+        fn as_bytes_only_valid_bases((encoded, len) in raw_seq_strategy()) {
             let seq = Seq { encoded: &encoded, len };
-            for &b in &seq.as_bytes() {
+            for (i, &b) in seq.as_bytes().iter().enumerate() {
                 prop_assert!(
-                    DECODE_BASE.contains(&b),
-                    "unexpected base: {} (0x{:02x})", b as char, b
+                    VALID_BASES.contains(&b),
+                    "base {} at position {} is not a valid BAM base", b as char, i
                 );
             }
         }
 
+        /// Roundtrip: ASCII bases → encode → decode → must recover the
+        /// original bases exactly. This is the fundamental correctness
+        /// invariant of the codec.
         #[test]
-        fn as_bytes_length_matches((encoded, len) in seq_strategy()) {
+        fn roundtrip_encode_decode(bases in ascii_bases_strategy()) {
+            let encoded = encode_bases(&bases);
+            let seq = Seq { encoded: &encoded, len: bases.len() };
+            prop_assert_eq!(seq.as_bytes(), bases);
+        }
+
+        /// Roundtrip in reverse: packed bytes → decode → re-encode →
+        /// must recover the same packed bytes. The trailing nibble of an
+        /// odd-length sequence is zeroed by encode, so we mask it before
+        /// comparing.
+        #[test]
+        fn roundtrip_decode_encode((encoded, len) in raw_seq_strategy()) {
             let seq = Seq { encoded: &encoded, len };
-            prop_assert_eq!(seq.as_bytes().len(), len);
+            let decoded = seq.as_bytes();
+            let re_encoded = encode_bases(&decoded);
+
+            // Mask the unused low nibble of the last byte for odd lengths
+            let mut expected = encoded.clone();
+            if len % 2 == 1 {
+                if let Some(last) = expected.last_mut() {
+                    *last &= 0xF0;
+                }
+            }
+            prop_assert_eq!(re_encoded, expected);
+        }
+
+        /// Changing one nibble must affect exactly one decoded base and
+        /// leave all others unchanged.
+        #[test]
+        fn nibble_independence(
+            (encoded, len) in raw_seq_strategy().prop_filter(
+                "need at least 1 base", |(_, l)| *l >= 1
+            ),
+            target_base in 0usize..512,
+            new_nibble in 0u8..16,
+        ) {
+            let target_base = target_base % len;
+            let byte_idx = target_base / 2;
+            let is_high = target_base % 2 == 0;
+
+            let seq_before = Seq { encoded: &encoded, len };
+            let decoded_before = seq_before.as_bytes();
+
+            let mut modified = encoded.clone();
+            if is_high {
+                modified[byte_idx] = (new_nibble << 4) | (modified[byte_idx] & 0x0F);
+            } else {
+                modified[byte_idx] = (modified[byte_idx] & 0xF0) | new_nibble;
+            }
+
+            let seq_after = Seq { encoded: &modified, len };
+            let decoded_after = seq_after.as_bytes();
+
+            for i in 0..len {
+                if i == target_base {
+                    // This base may have changed (or stayed same if nibble matches)
+                    let expected_nibble = if is_high {
+                        encoded[byte_idx] >> 4
+                    } else {
+                        encoded[byte_idx] & 0x0F
+                    };
+                    if new_nibble == expected_nibble {
+                        prop_assert_eq!(decoded_after[i], decoded_before[i]);
+                    }
+                } else {
+                    prop_assert_eq!(
+                        decoded_after[i], decoded_before[i],
+                        "base at position {} changed when only position {} was modified",
+                        i, target_base
+                    );
+                }
+            }
+        }
+
+        /// DECODE_PAIR table must be consistent with DECODE_BASE for
+        /// every possible byte value.
+        #[test]
+        fn decode_pair_consistent_with_decode_base(byte in any::<u8>()) {
+            let pair = DECODE_PAIR[byte as usize];
+            prop_assert_eq!(pair[0], DECODE_BASE[(byte >> 4) as usize]);
+            prop_assert_eq!(pair[1], DECODE_BASE[(byte & 0xf) as usize]);
         }
     }
 }

@@ -31,20 +31,8 @@ pub enum Error {
     WriteRecord,
 
     // Errors for faidx
-    #[error("The given position is too large to be converted to i64")]
-    FaidxPositionTooLarge,
-    #[error("bad conversion of sequence name")]
-    FaidxBadSeqName,
-    #[error("failed to build index for fasta file {path:?}")]
-    FaidxBuildFailed { path: std::path::PathBuf },
-    #[error("failed to open FASTA/FAI")]
-    FaidxOpenError,
-    #[error("failed to fetch sequence {name}:{begin}-{end}")]
-    FaidxFetchFailed {
-        name: String,
-        begin: usize,
-        end: usize,
-    },
+    #[error(transparent)]
+    Faidx(#[from] crate::faidx::FaidxError),
 
     // Errors for Tbx
     #[error("previous iterator generation failed")]

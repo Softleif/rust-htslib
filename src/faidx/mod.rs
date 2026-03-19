@@ -7,14 +7,33 @@
 //! Module for working with faidx-indexed FASTA files.
 //!
 
-use std::ffi;
-use std::path::Path;
-use url::Url;
+use std::path::{Path, PathBuf};
+
+use cstr8::CString8;
 
 use crate::htslib;
 
-use crate::errors::{Error, Result};
-use crate::utils::path_as_bytes;
+#[derive(thiserror::Error, Debug, PartialEq)]
+pub enum FaidxError {
+    #[error("FASTA file not found: {0:?}")]
+    FileNotFound(PathBuf),
+    #[error("non-unicode path: {0:?}")]
+    NonUnicodePath(PathBuf),
+    #[error("failed to open FASTA/FAI: {path}")]
+    Open { path: String },
+    #[error("failed to build FASTA index for {path:?}")]
+    Build { path: PathBuf },
+    #[error("sequence not found: {name}")]
+    SequenceNotFound { name: String },
+    #[error("position too large for htslib (must fit in i64)")]
+    PositionTooLarge,
+    #[error("sequence name at index {index} not found or not valid UTF-8")]
+    InvalidSequenceName { index: i32 },
+    #[error("sequence name contains interior null byte")]
+    NullByteName,
+    #[error("fetched sequence is not valid UTF-8")]
+    InvalidUtf8,
+}
 
 /// A Fasta reader.
 #[derive(Debug)]
@@ -22,26 +41,32 @@ pub struct Reader {
     inner: *mut htslib::faidx_t,
 }
 
-///
+/// Convert a path to a C string suitable for htslib, with precise errors.
+fn path_to_cstr8(path: &Path, must_exist: bool) -> Result<CString8, FaidxError> {
+    if must_exist && !path.exists() {
+        return Err(FaidxError::FileNotFound(path.to_owned()));
+    }
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| FaidxError::NonUnicodePath(path.to_owned()))?;
+    CString8::new(path_str).map_err(|_| FaidxError::NonUnicodePath(path.to_owned()))
+}
+
 /// Build a faidx for input path.
-///
-/// # Errors
-/// If indexing fails. Could be malformatted or file could not be accessible.
 ///
 ///```
 /// use rust_htslib::faidx::build;
 /// let path = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"),"/test/test_cram.fa"));
 /// build(&path).expect("Failed to build fasta index");
 ///```
-///
-pub fn build(
-    path: impl Into<std::path::PathBuf>,
-) -> Result<(), std::boxed::Box<dyn std::error::Error>> {
-    let path = path.into();
-    let os_path = std::ffi::CString::new(path.display().to_string())?;
-    let rc = unsafe { htslib::fai_build(os_path.as_ptr()) };
+pub fn build<P: AsRef<Path>>(path: P) -> Result<(), FaidxError> {
+    let path = path.as_ref();
+    let cpath = path_to_cstr8(path, true)?;
+    let rc = unsafe { htslib::fai_build(cpath.as_ptr().cast()) };
     if rc < 0 {
-        Err(Error::FaidxBuildFailed { path })?
+        Err(FaidxError::Build {
+            path: path.to_owned(),
+        })
     } else {
         Ok(())
     }
@@ -49,143 +74,110 @@ pub fn build(
 
 impl Reader {
     /// Create a new Reader from a path.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - the path to open.
-    pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
-        Self::new(&path_as_bytes(path, true)?)
-    }
-
-    /// Create a new Reader from an URL.
-    ///
-    /// # Arguments
-    ///
-    /// * `url` - the url to open
-    pub fn from_url(url: &Url) -> Result<Self, Error> {
-        Self::new(url.as_str().as_bytes())
-    }
-
-    /// Internal function to create a Reader from some sort of path (could be file path but also URL).
-    /// The path or URL will be handled by the c-implementation transparently.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - the path or URL to open
-    fn new(path: &[u8]) -> Result<Self, Error> {
-        let cpath = ffi::CString::new(path).map_err(|_| Error::FaidxOpenError)?;
-        let inner = unsafe { htslib::fai_load(cpath.as_ptr()) };
+    pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Self, FaidxError> {
+        let path = path.as_ref();
+        let cpath = path_to_cstr8(path, true)?;
+        let inner = unsafe { htslib::fai_load(cpath.as_ptr().cast()) };
         if inner.is_null() {
-            return Err(Error::FaidxOpenError);
+            // path_to_cstr8 succeeded, so to_string_lossy is lossless here
+            return Err(FaidxError::Open {
+                path: path.to_string_lossy().into_owned(),
+            });
+        }
+        Ok(Self { inner })
+    }
+
+    /// Create a new Reader from a URL.
+    pub fn from_url(url: &url::Url) -> Result<Self, FaidxError> {
+        let url_str = url.as_str();
+        let cpath = CString8::new(url_str).map_err(|_| FaidxError::Open {
+            path: url_str.to_owned(),
+        })?;
+        let inner = unsafe { htslib::fai_load(cpath.as_ptr().cast()) };
+        if inner.is_null() {
+            return Err(FaidxError::Open {
+                path: url_str.to_owned(),
+            });
         }
         Ok(Self { inner })
     }
 
     /// Fetch the sequence as a byte array.
     ///
-    /// # Arguments
-    ///
-    /// * `name` - the name of the template sequence (e.g., "chr1")
-    /// * `begin` - the offset within the template sequence (starting with 0)
-    /// * `end` - the end position to return (if smaller than `begin`, the behavior is undefined).
-    pub fn fetch_seq<N: AsRef<str>>(&self, name: N, begin: usize, end: usize) -> Result<Vec<u8>> {
-        if begin > i64::MAX as usize {
-            return Err(Error::FaidxPositionTooLarge);
+    /// Coordinates are 0-based inclusive: `[begin, end]`.
+    pub fn fetch_seq<N: AsRef<str>>(
+        &self,
+        name: N,
+        begin: usize,
+        end: usize,
+    ) -> Result<Vec<u8>, FaidxError> {
+        if begin > i64::MAX as usize || end > i64::MAX as usize {
+            return Err(FaidxError::PositionTooLarge);
         }
-        if end > i64::MAX as usize {
-            return Err(Error::FaidxPositionTooLarge);
-        }
-        let cname = ffi::CString::new(name.as_ref().as_bytes()).map_err(|_| {
-            Error::FaidxFetchFailed {
-                name: name.as_ref().to_owned(),
-                begin,
-                end,
-            }
-        })?;
+        let cname = CString8::new(name.as_ref()).map_err(|_| FaidxError::NullByteName)?;
         let mut len_out: htslib::hts_pos_t = 0;
         let ptr = unsafe {
             htslib::faidx_fetch_seq64(
-                self.inner,                 //*const faidx_t,
-                cname.as_ptr(),             // c_name
-                begin as htslib::hts_pos_t, // p_beg_i
-                end as htslib::hts_pos_t,   // p_end_i
-                &mut len_out,               //len
+                self.inner,
+                cname.as_ptr().cast(),
+                begin as htslib::hts_pos_t,
+                end as htslib::hts_pos_t,
+                &mut len_out,
             )
         };
         if ptr.is_null() || len_out < 0 {
-            return Err(Error::FaidxFetchFailed {
+            return Err(FaidxError::SequenceNotFound {
                 name: name.as_ref().to_owned(),
-                begin,
-                end,
             });
         }
-        // Copy the data out of the C-allocated buffer and free it with libc::free.
-        // We must not use Vec::from_raw_parts because the pointer was allocated by
-        // htslib's malloc, not Rust's global allocator. If a custom allocator is
-        // active (e.g. mimalloc), dropping the Vec would call the wrong deallocator.
+        // Copy out of C-allocated buffer and free with libc::free.
+        // We must not use Vec::from_raw_parts because the pointer was allocated
+        // by htslib's malloc, not Rust's global allocator. If a custom allocator
+        // is active (e.g. mimalloc), dropping the Vec would be undefined behavior.
         let len = len_out as usize;
         let vec = unsafe { std::slice::from_raw_parts(ptr as *const u8, len) }.to_vec();
         unsafe { libc::free(ptr as *mut libc::c_void) };
         Ok(vec)
     }
 
-    /// Fetches the sequence and returns it as string.
+    /// Fetches the sequence and returns it as a string.
     ///
-    /// # Arguments
-    ///
-    /// * `name` - the name of the template sequence (e.g., "chr1")
-    /// * `begin` - the offset within the template sequence (starting with 0)
-    /// * `end` - the end position to return (if smaller than `begin`, the behavior is undefined).
+    /// Coordinates are 0-based inclusive: `[begin, end]`.
     pub fn fetch_seq_string<N: AsRef<str>>(
         &self,
         name: N,
         begin: usize,
         end: usize,
-    ) -> Result<String> {
+    ) -> Result<String, FaidxError> {
         let bytes = self.fetch_seq(name, begin, end)?;
-        String::from_utf8(bytes).map_err(|_| Error::FaidxBadSeqName)
+        String::from_utf8(bytes).map_err(|_| FaidxError::InvalidUtf8)
     }
 
     /// Fetches the number of sequences in the fai index.
     pub fn n_seqs(&self) -> u64 {
         let n = unsafe { htslib::faidx_nseq(self.inner) };
-        // faidx_nseq returns c_int; negative should not occur on a valid
-        // Reader (constructor validated the index), but clamp defensively.
         n.max(0) as u64
     }
 
-    /// Fetches the i-th sequence name
-    ///
-    /// # Arguments
-    ///
-    /// * `i` - index to query
-    pub fn seq_name(&self, i: i32) -> Result<String> {
+    /// Fetches the i-th sequence name.
+    pub fn seq_name(&self, i: i32) -> Result<String, FaidxError> {
         let ptr = unsafe { htslib::faidx_iseq(self.inner, i) };
         if ptr.is_null() {
-            return Err(Error::FaidxBadSeqName);
+            return Err(FaidxError::InvalidSequenceName { index: i });
         }
-        let cname = unsafe { ffi::CStr::from_ptr(ptr) };
-
-        let out = match cname.to_str() {
-            Ok(s) => s.to_string(),
-            Err(_) => {
-                return Err(Error::FaidxBadSeqName);
-            }
-        };
-
-        Ok(out)
+        let cname = unsafe { std::ffi::CStr::from_ptr(ptr) };
+        cname
+            .to_str()
+            .map(|s| s.to_owned())
+            .map_err(|_| FaidxError::InvalidSequenceName { index: i })
     }
 
     /// Fetches the length of the given sequence name.
     ///
     /// Returns `None` if the sequence is not found in the index.
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - the name of the template sequence (e.g., "chr1")
     pub fn fetch_seq_len<N: AsRef<str>>(&self, name: N) -> Option<u64> {
-        let cname = ffi::CString::new(name.as_ref().as_bytes()).ok()?;
-        let seq_len = unsafe { htslib::faidx_seq_len64(self.inner, cname.as_ptr()) };
+        let cname = CString8::new(name.as_ref()).ok()?;
+        let seq_len = unsafe { htslib::faidx_seq_len64(self.inner, cname.as_ptr().cast()) };
         if seq_len < 0 {
             None
         } else {
@@ -193,25 +185,16 @@ impl Reader {
         }
     }
 
-    /// Returns a Result<Vector<String>> for all seq names.
+    /// Returns all sequence names.
     ///
-    /// # Errors
-    ///
-    /// * `errors::Error::FaidxBadSeqName` - missing sequence name for sequence id.
-    ///
-    /// If thrown, the index is malformed, and the number of sequences in the
-    /// index does not match the number of sequence names available.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use rust_htslib::faidx::build;
-    /// let path = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"),"/test/test_cram.fa"));
-    /// build(&path).expect("Failed to build fasta index");
-    /// let reader = rust_htslib::faidx::Reader::from_path(path).expect("Failed to open faidx");
+    ///```
+    /// use rust_htslib::faidx;
+    /// let path = concat!(env!("CARGO_MANIFEST_DIR"),"/test/test_cram.fa");
+    /// faidx::build(&path).expect("Failed to build fasta index");
+    /// let reader = faidx::Reader::from_path(path).expect("Failed to open faidx");
     /// assert_eq!(reader.seq_names(), Ok(vec!["chr1".to_string(), "chr2".to_string(), "chr3".to_string()]));
-    /// ```
-    pub fn seq_names(&self) -> Result<Vec<String>> {
+    ///```
+    pub fn seq_names(&self) -> Result<Vec<String>, FaidxError> {
         let num_seq = self.n_seqs();
         let mut ret = Vec::with_capacity(num_seq as usize);
         for seq_id in 0..num_seq {
@@ -236,10 +219,9 @@ mod tests {
     use super::*;
 
     fn open_reader() -> Reader {
-        Reader::from_path(format!("{}/test/test_cram.fa", env!("CARGO_MANIFEST_DIR")))
-            .ok()
-            .unwrap()
+        Reader::from_path(format!("{}/test/test_cram.fa", env!("CARGO_MANIFEST_DIR"))).unwrap()
     }
+
     #[test]
     fn faidx_open() {
         open_reader();
@@ -262,7 +244,6 @@ mod tests {
     fn faidx_read_chr_start() {
         let r = open_reader();
 
-        //for _i in 0..100_000_000 { // loop to check for memory leaks
         let bseq = r.fetch_seq("chr1", 0, 9).unwrap();
         assert_eq!(bseq.len(), 10);
         assert_eq!(bseq, b"GGGCACAGCC");
@@ -270,7 +251,6 @@ mod tests {
         let seq = r.fetch_seq_string("chr1", 0, 9).unwrap();
         assert_eq!(seq.len(), 10);
         assert_eq!(seq, "GGGCACAGCC");
-        //}
     }
 
     #[test]
@@ -328,7 +308,7 @@ mod tests {
         let r = open_reader();
         let position_too_large = i64::MAX as usize;
         let res = r.fetch_seq("chr1", position_too_large, position_too_large + 1);
-        assert_eq!(res, Err(Error::FaidxPositionTooLarge));
+        assert!(matches!(res, Err(FaidxError::PositionTooLarge)));
     }
 
     #[test]
@@ -362,35 +342,38 @@ mod tests {
     #[test]
     fn faidx_open_nonexistent_errors() {
         let result = Reader::from_path("/does/not/exist.fa");
-        assert!(result.is_err());
+        assert!(matches!(result, Err(FaidxError::FileNotFound(_))));
     }
 
     #[test]
     fn faidx_fetch_nonexistent_seq_errors() {
         let r = open_reader();
         let result = r.fetch_seq("nonexistent_chromosome", 0, 10);
-        assert!(result.is_err());
+        assert!(matches!(result, Err(FaidxError::SequenceNotFound { .. })));
     }
 
     #[test]
     fn faidx_fetch_nonexistent_seq_string_errors() {
         let r = open_reader();
         let result = r.fetch_seq_string("nonexistent_chromosome", 0, 10);
-        assert!(result.is_err());
+        assert!(matches!(result, Err(FaidxError::SequenceNotFound { .. })));
     }
 
     #[test]
     fn faidx_seq_name_out_of_bounds_errors() {
         let r = open_reader();
-        // There are only 3 sequences (indices 0, 1, 2)
-        let result = r.seq_name(3);
-        assert!(result.is_err());
-
-        let result = r.seq_name(999);
-        assert!(result.is_err());
-
-        let result = r.seq_name(-1);
-        assert!(result.is_err());
+        assert!(matches!(
+            r.seq_name(3),
+            Err(FaidxError::InvalidSequenceName { index: 3 })
+        ));
+        assert!(matches!(
+            r.seq_name(999),
+            Err(FaidxError::InvalidSequenceName { index: 999 })
+        ));
+        assert!(matches!(
+            r.seq_name(-1),
+            Err(FaidxError::InvalidSequenceName { index: -1 })
+        ));
     }
 
     #[test]
@@ -399,16 +382,14 @@ mod tests {
         // htslib docs say behavior is undefined when begin > end,
         // but it should not segfault
         let result = r.fetch_seq("chr1", 10, 5);
-        // We don't care if it's Ok or Err, just that it doesn't crash
         drop(result);
     }
 
     #[test]
     fn faidx_fetch_seq_past_chromosome_end() {
         let r = open_reader();
-        // chr1 is 120bp; fetch beyond that
+        // chr1 is 120bp; fetch beyond that — htslib clamps
         let result = r.fetch_seq("chr1", 0, 999);
-        // htslib clamps to chromosome length, should not crash
         assert!(result.is_ok());
     }
 
@@ -428,7 +409,6 @@ mod tests {
     #[test]
     fn faidx_fetch_many_times_no_leak() {
         let r = open_reader();
-        // Exercises the copy+free path repeatedly to catch allocator mismatches
         for _ in 0..100_000 {
             let seq = r.fetch_seq("chr1", 0, 119).unwrap();
             assert_eq!(seq.len(), 120);

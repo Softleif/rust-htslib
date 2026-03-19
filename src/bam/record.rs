@@ -3667,3 +3667,62 @@ mod basemod_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Reference implementation: decode one base at a time using the original
+    /// per-base logic. Used to verify the optimized `as_bytes()`.
+    fn as_bytes_reference(seq: &Seq<'_>) -> Vec<u8> {
+        (0..seq.len())
+            .map(|i| *decode_base_unchecked(encoded_base(seq.encoded, i)))
+            .collect()
+    }
+
+    /// Strategy that generates a valid (encoded, len) pair for Seq.
+    /// `len` is the number of bases (1..=512), and `encoded` is the
+    /// packed byte array with ceil(len/2) bytes, each nibble in 0..16.
+    fn seq_strategy() -> impl Strategy<Value = (Vec<u8>, usize)> {
+        (1usize..=512).prop_flat_map(|len| {
+            let n_bytes = (len + 1) / 2;
+            (proptest::collection::vec(any::<u8>(), n_bytes), Just(len))
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn as_bytes_matches_reference((encoded, len) in seq_strategy()) {
+            let seq = Seq { encoded: &encoded, len };
+            prop_assert_eq!(seq.as_bytes(), as_bytes_reference(&seq));
+        }
+
+        #[test]
+        fn get_matches_index((encoded, len) in seq_strategy()) {
+            let seq = Seq { encoded: &encoded, len };
+            for i in 0..len {
+                prop_assert_eq!(seq.get(i), Some(seq[i]));
+            }
+            prop_assert_eq!(seq.get(len), None);
+            prop_assert_eq!(seq.get(len + 1), None);
+        }
+
+        #[test]
+        fn as_bytes_only_contains_valid_bases((encoded, len) in seq_strategy()) {
+            let seq = Seq { encoded: &encoded, len };
+            for &b in &seq.as_bytes() {
+                prop_assert!(
+                    DECODE_BASE.contains(&b),
+                    "unexpected base: {} (0x{:02x})", b as char, b
+                );
+            }
+        }
+
+        #[test]
+        fn as_bytes_length_matches((encoded, len) in seq_strategy()) {
+            let seq = Seq { encoded: &encoded, len };
+            prop_assert_eq!(seq.as_bytes().len(), len);
+        }
+    }
+}

@@ -37,6 +37,14 @@ pub enum Error {
     FaidxBadSeqName,
     #[error("failed to build index for fasta file {path:?}")]
     FaidxBuildFailed { path: std::path::PathBuf },
+    #[error("failed to open FASTA/FAI")]
+    FaidxOpenError,
+    #[error("failed to fetch sequence {name}:{begin}-{end}")]
+    FaidxFetchFailed {
+        name: String,
+        begin: usize,
+        end: usize,
+    },
 
     // Errors for Tbx
     #[error("previous iterator generation failed")]

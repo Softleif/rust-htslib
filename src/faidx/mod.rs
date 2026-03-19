@@ -73,8 +73,11 @@ impl Reader {
     ///
     /// * `path` - the path or URL to open
     fn new(path: &[u8]) -> Result<Self, Error> {
-        let cpath = ffi::CString::new(path).unwrap();
+        let cpath = ffi::CString::new(path).map_err(|_| Error::FaidxOpenError)?;
         let inner = unsafe { htslib::fai_load(cpath.as_ptr()) };
+        if inner.is_null() {
+            return Err(Error::FaidxOpenError);
+        }
         Ok(Self { inner })
     }
 
@@ -92,7 +95,13 @@ impl Reader {
         if end > i64::MAX as usize {
             return Err(Error::FaidxPositionTooLarge);
         }
-        let cname = ffi::CString::new(name.as_ref().as_bytes()).unwrap();
+        let cname = ffi::CString::new(name.as_ref().as_bytes()).map_err(|_| {
+            Error::FaidxFetchFailed {
+                name: name.as_ref().to_owned(),
+                begin,
+                end,
+            }
+        })?;
         let mut len_out: htslib::hts_pos_t = 0;
         let ptr = unsafe {
             htslib::faidx_fetch_seq64(
@@ -103,8 +112,20 @@ impl Reader {
                 &mut len_out,               //len
             )
         };
-        let vec =
-            unsafe { Vec::from_raw_parts(ptr as *mut u8, len_out as usize, len_out as usize) };
+        if ptr.is_null() || len_out < 0 {
+            return Err(Error::FaidxFetchFailed {
+                name: name.as_ref().to_owned(),
+                begin,
+                end,
+            });
+        }
+        // Copy the data out of the C-allocated buffer and free it with libc::free.
+        // We must not use Vec::from_raw_parts because the pointer was allocated by
+        // htslib's malloc, not Rust's global allocator. If a custom allocator is
+        // active (e.g. mimalloc), dropping the Vec would call the wrong deallocator.
+        let len = len_out as usize;
+        let vec = unsafe { std::slice::from_raw_parts(ptr as *const u8, len) }.to_vec();
+        unsafe { libc::free(ptr as *mut libc::c_void) };
         Ok(vec)
     }
 
@@ -122,13 +143,15 @@ impl Reader {
         end: usize,
     ) -> Result<String> {
         let bytes = self.fetch_seq(name, begin, end)?;
-        Ok(std::str::from_utf8(&bytes).unwrap().to_owned())
+        String::from_utf8(bytes).map_err(|_| Error::FaidxBadSeqName)
     }
 
-    /// Fetches the number of sequences in the fai index
+    /// Fetches the number of sequences in the fai index.
     pub fn n_seqs(&self) -> u64 {
         let n = unsafe { htslib::faidx_nseq(self.inner) };
-        n as u64
+        // faidx_nseq returns c_int; negative should not occur on a valid
+        // Reader (constructor validated the index), but clamp defensively.
+        n.max(0) as u64
     }
 
     /// Fetches the i-th sequence name
@@ -137,10 +160,11 @@ impl Reader {
     ///
     /// * `i` - index to query
     pub fn seq_name(&self, i: i32) -> Result<String> {
-        let cname = unsafe {
-            let ptr = htslib::faidx_iseq(self.inner, i);
-            ffi::CStr::from_ptr(ptr)
-        };
+        let ptr = unsafe { htslib::faidx_iseq(self.inner, i) };
+        if ptr.is_null() {
+            return Err(Error::FaidxBadSeqName);
+        }
+        let cname = unsafe { ffi::CStr::from_ptr(ptr) };
 
         let out = match cname.to_str() {
             Ok(s) => s.to_string(),
@@ -154,29 +178,39 @@ impl Reader {
 
     /// Fetches the length of the given sequence name.
     ///
+    /// Returns `None` if the sequence is not found in the index.
+    ///
     /// # Arguments
     ///
     /// * `name` - the name of the template sequence (e.g., "chr1")
-    pub fn fetch_seq_len<N: AsRef<str>>(&self, name: N) -> u64 {
-        let cname = ffi::CString::new(name.as_ref().as_bytes()).unwrap();
-        let seq_len = unsafe { htslib::faidx_seq_len(self.inner, cname.as_ptr()) };
-        seq_len as u64
+    pub fn fetch_seq_len<N: AsRef<str>>(&self, name: N) -> Option<u64> {
+        let cname = ffi::CString::new(name.as_ref().as_bytes()).ok()?;
+        let seq_len = unsafe { htslib::faidx_seq_len64(self.inner, cname.as_ptr()) };
+        if seq_len < 0 {
+            None
+        } else {
+            Some(seq_len as u64)
+        }
     }
 
     /// Returns a Result<Vector<String>> for all seq names.
+    ///
     /// # Errors
     ///
     /// * `errors::Error::FaidxBadSeqName` - missing sequence name for sequence id.
     ///
-    /// If thrown, the index is malformed, and the number of sequences in the index does not match the number of sequence names available.
-    ///```
+    /// If thrown, the index is malformed, and the number of sequences in the
+    /// index does not match the number of sequence names available.
+    ///
+    /// # Examples
+    ///
+    /// ```
     /// use rust_htslib::faidx::build;
     /// let path = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"),"/test/test_cram.fa"));
     /// build(&path).expect("Failed to build fasta index");
     /// let reader = rust_htslib::faidx::Reader::from_path(path).expect("Failed to open faidx");
     /// assert_eq!(reader.seq_names(), Ok(vec!["chr1".to_string(), "chr2".to_string(), "chr3".to_string()]));
-    ///```
-    ///
+    /// ```
     pub fn seq_names(&self) -> Result<Vec<String>> {
         let num_seq = self.n_seqs();
         let mut ret = Vec::with_capacity(num_seq as usize);
@@ -313,10 +347,8 @@ mod tests {
     #[test]
     fn faidx_get_seq_len() {
         let r = open_reader();
-        let chr1_len = r.fetch_seq_len("chr1");
-        let chr2_len = r.fetch_seq_len("chr2");
-        assert_eq!(chr1_len, 120u64);
-        assert_eq!(chr2_len, 120u64);
+        assert_eq!(r.fetch_seq_len("chr1"), Some(120));
+        assert_eq!(r.fetch_seq_len("chr2"), Some(120));
     }
 
     #[test]
@@ -324,6 +356,82 @@ mod tests {
         for _ in 0..500_000 {
             let reader = open_reader();
             drop(reader);
+        }
+    }
+
+    #[test]
+    fn faidx_open_nonexistent_errors() {
+        let result = Reader::from_path("/does/not/exist.fa");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn faidx_fetch_nonexistent_seq_errors() {
+        let r = open_reader();
+        let result = r.fetch_seq("nonexistent_chromosome", 0, 10);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn faidx_fetch_nonexistent_seq_string_errors() {
+        let r = open_reader();
+        let result = r.fetch_seq_string("nonexistent_chromosome", 0, 10);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn faidx_seq_name_out_of_bounds_errors() {
+        let r = open_reader();
+        // There are only 3 sequences (indices 0, 1, 2)
+        let result = r.seq_name(3);
+        assert!(result.is_err());
+
+        let result = r.seq_name(999);
+        assert!(result.is_err());
+
+        let result = r.seq_name(-1);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn faidx_fetch_seq_begin_after_end() {
+        let r = open_reader();
+        // htslib docs say behavior is undefined when begin > end,
+        // but it should not segfault
+        let result = r.fetch_seq("chr1", 10, 5);
+        // We don't care if it's Ok or Err, just that it doesn't crash
+        drop(result);
+    }
+
+    #[test]
+    fn faidx_fetch_seq_past_chromosome_end() {
+        let r = open_reader();
+        // chr1 is 120bp; fetch beyond that
+        let result = r.fetch_seq("chr1", 0, 999);
+        // htslib clamps to chromosome length, should not crash
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn faidx_fetch_empty_name() {
+        let r = open_reader();
+        let result = r.fetch_seq("", 0, 10);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn faidx_seq_len_nonexistent() {
+        let r = open_reader();
+        assert_eq!(r.fetch_seq_len("nonexistent"), None);
+    }
+
+    #[test]
+    fn faidx_fetch_many_times_no_leak() {
+        let r = open_reader();
+        // Exercises the copy+free path repeatedly to catch allocator mismatches
+        for _ in 0..100_000 {
+            let seq = r.fetch_seq("chr1", 0, 119).unwrap();
+            assert_eq!(seq.len(), 120);
         }
     }
 }

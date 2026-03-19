@@ -11,14 +11,14 @@ use crate::bam::record::Cigar;
 use crate::htslib;
 use std::collections::HashMap;
 
-pub struct IterAlignedBlockPairs {
+pub struct IterAlignedBlockPairs<'a> {
     genome_pos: i64,
     read_pos: i64,
     cigar_index: usize,
-    raw_cigar: Box<[u32]>,
+    raw_cigar: &'a [u32],
 }
 
-impl Iterator for IterAlignedBlockPairs {
+impl Iterator for IterAlignedBlockPairs<'_> {
     type Item = ([i64; 2], [i64; 2]);
     fn next(&mut self) -> Option<Self::Item> {
         while self.cigar_index < self.raw_cigar.len() {
@@ -48,13 +48,13 @@ impl Iterator for IterAlignedBlockPairs {
     }
 }
 
-pub struct IterAlignedBlocks {
+pub struct IterAlignedBlocks<'a> {
     pos: i64,
     cigar_index: usize,
-    raw_cigar: Box<[u32]>,
+    raw_cigar: &'a [u32],
 }
 
-impl Iterator for IterAlignedBlocks {
+impl Iterator for IterAlignedBlocks<'_> {
     type Item = [i64; 2];
     fn next(&mut self) -> Option<Self::Item> {
         while self.cigar_index < self.raw_cigar.len() {
@@ -76,13 +76,13 @@ impl Iterator for IterAlignedBlocks {
     }
 }
 
-pub struct IterIntrons {
+pub struct IterIntrons<'a> {
     pos: i64,
     cigar_index: usize,
-    raw_cigar: Box<[u32]>,
+    raw_cigar: &'a [u32],
 }
 
-impl Iterator for IterIntrons {
+impl Iterator for IterIntrons<'_> {
     type Item = [i64; 2];
     fn next(&mut self) -> Option<Self::Item> {
         while self.cigar_index < self.raw_cigar.len() {
@@ -102,15 +102,15 @@ impl Iterator for IterIntrons {
     }
 }
 
-pub struct IterAlignedPairs {
+pub struct IterAlignedPairs<'a> {
     genome_pos: i64,
     read_pos: i64,
-    raw_cigar: Box<[u32]>,
+    raw_cigar: &'a [u32],
     remaining_match_bp: u32,
     cigar_index: usize,
 }
 
-impl Iterator for IterAlignedPairs {
+impl Iterator for IterAlignedPairs<'_> {
     type Item = [i64; 2];
     fn next(&mut self) -> Option<Self::Item> {
         if self.remaining_match_bp > 0 {
@@ -146,17 +146,17 @@ impl Iterator for IterAlignedPairs {
     }
 }
 
-pub struct IterAlignedPairsFull {
+pub struct IterAlignedPairsFull<'a> {
     genome_pos: i64,
     read_pos: i64,
-    raw_cigar: Box<[u32]>,
+    raw_cigar: &'a [u32],
     remaining_match_bp: u32,
     remaining_ins_bp: u32,
     remaining_del_bp: u32,
     cigar_index: usize,
 }
 
-impl Iterator for IterAlignedPairsFull {
+impl Iterator for IterAlignedPairsFull<'_> {
     type Item = [Option<i64>; 2];
     fn next(&mut self) -> Option<Self::Item> {
         if self.remaining_match_bp > 0 {
@@ -219,7 +219,7 @@ pub trait BamRecordExtensions {
     /// pysam: blocks
     /// See also: [aligned_block_pairs](#tymethod.aligned_block_pairs) if you need
     /// the read coordinates as well.
-    fn aligned_blocks(&self) -> IterAlignedBlocks;
+    fn aligned_blocks(&self) -> IterAlignedBlocks<'_>;
 
     ///Iter over <([read_start, read_stop], [genome_start, genome_stop]) blocks
     ///of continously aligned reads.
@@ -231,14 +231,14 @@ pub trait BamRecordExtensions {
     ///
     ///There is not necessarily a gap between blocks in either coordinate space
     ///(this happens in in-dels).
-    fn aligned_block_pairs(&self) -> IterAlignedBlockPairs;
+    fn aligned_block_pairs(&self) -> IterAlignedBlockPairs<'_>;
 
     /// This scans the CIGAR for reference skips
     /// and reports their positions.
     /// It does not inspect the reported regions
     /// for actual splice sites.
     /// pysam: get_introns
-    fn introns(&self) -> IterIntrons;
+    fn introns(&self) -> IterIntrons<'_>;
 
     /// iter aligned read and reference positions on a basepair level
     ///
@@ -250,7 +250,7 @@ pub trait BamRecordExtensions {
     /// if you just need start&end coordinates of each block.
     /// That way you can allocate less memory for the same
     /// informational content.
-    fn aligned_pairs(&self) -> IterAlignedPairs;
+    fn aligned_pairs(&self) -> IterAlignedPairs<'_>;
 
     /// iter list of read and reference positions on a basepair level.
     ///
@@ -259,7 +259,7 @@ pub trait BamRecordExtensions {
     /// for insertions, deletions or skipped pairs
     ///
     /// pysam: aligned_pairs(matches_only = False)
-    fn aligned_pairs_full(&self) -> IterAlignedPairsFull;
+    fn aligned_pairs_full(&self) -> IterAlignedPairsFull<'_>;
 
     /// the number of nucleotides covered by each Cigar::* variant.
     ///
@@ -282,7 +282,7 @@ pub trait BamRecordExtensions {
     /// or unaligned positions within the read
     ///
     /// pysam: get_reference_positions(full_length=False)
-    fn reference_positions(&self) -> Box<dyn Iterator<Item = i64>>;
+    fn reference_positions(&self) -> Box<dyn Iterator<Item = i64> + '_>;
 
     ///
     /// iter over reference positions that this read aligns to
@@ -290,7 +290,7 @@ pub trait BamRecordExtensions {
     /// include soft-clipped or skipped positions as None
     ///
     /// pysam: get_reference_positions(full_length=True)
-    fn reference_positions_full(&self) -> Box<dyn Iterator<Item = Option<i64>>>;
+    fn reference_positions_full(&self) -> Box<dyn Iterator<Item = Option<i64>> + '_>;
 
     /// left most aligned reference position of the read on the reference genome.
     fn reference_start(&self) -> i64;
@@ -328,46 +328,46 @@ fn cigar_counts_to_hashmap(counts: &[i32; 9]) -> HashMap<Cigar, i32> {
 }
 
 impl BamRecordExtensions for bam::Record {
-    fn aligned_blocks(&self) -> IterAlignedBlocks {
+    fn aligned_blocks(&self) -> IterAlignedBlocks<'_> {
         IterAlignedBlocks {
             pos: self.pos(),
-            raw_cigar: self.raw_cigar().into(),
+            raw_cigar: self.raw_cigar(),
             cigar_index: 0,
         }
     }
 
-    fn introns(&self) -> IterIntrons {
+    fn introns(&self) -> IterIntrons<'_> {
         IterIntrons {
             pos: self.pos(),
-            raw_cigar: self.raw_cigar().into(),
+            raw_cigar: self.raw_cigar(),
             cigar_index: 0,
         }
     }
 
-    fn aligned_block_pairs(&self) -> IterAlignedBlockPairs {
+    fn aligned_block_pairs(&self) -> IterAlignedBlockPairs<'_> {
         IterAlignedBlockPairs {
             genome_pos: self.pos(),
             read_pos: 0,
-            raw_cigar: self.raw_cigar().into(),
+            raw_cigar: self.raw_cigar(),
             cigar_index: 0,
         }
     }
 
-    fn aligned_pairs(&self) -> IterAlignedPairs {
+    fn aligned_pairs(&self) -> IterAlignedPairs<'_> {
         IterAlignedPairs {
             genome_pos: self.pos(),
             read_pos: 0,
-            raw_cigar: self.raw_cigar().into(),
+            raw_cigar: self.raw_cigar(),
             remaining_match_bp: 0,
             cigar_index: 0,
         }
     }
 
-    fn aligned_pairs_full(&self) -> IterAlignedPairsFull {
+    fn aligned_pairs_full(&self) -> IterAlignedPairsFull<'_> {
         IterAlignedPairsFull {
             genome_pos: self.pos(),
             read_pos: 0,
-            raw_cigar: self.raw_cigar().into(),
+            raw_cigar: self.raw_cigar(),
             remaining_match_bp: 0,
             remaining_ins_bp: 0,
             remaining_del_bp: 0,
@@ -392,11 +392,11 @@ impl BamRecordExtensions for bam::Record {
         cigar_counts_to_hashmap(&counts)
     }
 
-    fn reference_positions(&self) -> Box<dyn Iterator<Item = i64>> {
+    fn reference_positions(&self) -> Box<dyn Iterator<Item = i64> + '_> {
         Box::new(self.aligned_pairs().map(|x| x[1]))
     }
 
-    fn reference_positions_full(&self) -> Box<dyn Iterator<Item = Option<i64>>> {
+    fn reference_positions_full(&self) -> Box<dyn Iterator<Item = Option<i64>> + '_> {
         Box::new(
             self.aligned_pairs_full()
                 .filter(|x| x[0].is_some())

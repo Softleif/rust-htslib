@@ -6,7 +6,8 @@
 //! Extensions for BAM records beyond htslib
 
 use crate::bam;
-use crate::bam::record::{Cigar, CigarString};
+use crate::bam::record::cigar_op;
+use crate::bam::record::Cigar;
 use crate::htslib;
 use std::collections::HashMap;
 
@@ -14,35 +15,34 @@ pub struct IterAlignedBlockPairs {
     genome_pos: i64,
     read_pos: i64,
     cigar_index: usize,
-    cigar: CigarString,
+    raw_cigar: Box<[u32]>,
 }
 
 impl Iterator for IterAlignedBlockPairs {
     type Item = ([i64; 2], [i64; 2]);
     fn next(&mut self) -> Option<Self::Item> {
-        while self.cigar_index < self.cigar.len() {
-            let entry = self.cigar[self.cigar_index];
-            match entry {
-                Cigar::Match(len) | Cigar::Equal(len) | Cigar::Diff(len) => {
-                    let qstart = self.read_pos;
-                    let qend = qstart + len as i64;
-                    let rstart = self.genome_pos;
-                    let rend = self.genome_pos + len as i64;
-                    self.read_pos += len as i64;
-                    self.genome_pos += len as i64;
-                    self.cigar_index += 1;
-                    return Some(([qstart, qend], [rstart, rend]));
-                }
-                Cigar::Ins(len) | Cigar::SoftClip(len) => {
-                    self.read_pos += len as i64;
-                }
-                Cigar::Del(len) | Cigar::RefSkip(len) => {
-                    self.genome_pos += len as i64;
-                }
-                Cigar::HardClip(_) => {} // no advance
-                Cigar::Pad(_) => panic!("Padding (Cigar::Pad) is not supported."), //padding is only used for multiple sequence alignment
-            }
+        while self.cigar_index < self.raw_cigar.len() {
+            let raw = self.raw_cigar[self.cigar_index];
+            let op = cigar_op::op(raw);
+            let len = cigar_op::len(raw) as i64;
             self.cigar_index += 1;
+            assert!(
+                op != cigar_op::PAD,
+                "Padding (Cigar::Pad) is not supported."
+            );
+            let cr = cigar_op::consumes_ref(op);
+            let cq = cigar_op::consumes_query(op);
+            if cr && cq {
+                let qstart = self.read_pos;
+                let rstart = self.genome_pos;
+                self.read_pos += len;
+                self.genome_pos += len;
+                return Some(([qstart, qstart + len], [rstart, rstart + len]));
+            } else if cq {
+                self.read_pos += len;
+            } else if cr {
+                self.genome_pos += len;
+            }
         }
         None
     }
@@ -51,27 +51,26 @@ impl Iterator for IterAlignedBlockPairs {
 pub struct IterAlignedBlocks {
     pos: i64,
     cigar_index: usize,
-    cigar: CigarString,
+    raw_cigar: Box<[u32]>,
 }
 
 impl Iterator for IterAlignedBlocks {
     type Item = [i64; 2];
     fn next(&mut self) -> Option<Self::Item> {
-        while self.cigar_index < self.cigar.len() {
-            let entry = self.cigar[self.cigar_index];
-            match entry {
-                Cigar::Match(len) | Cigar::Equal(len) | Cigar::Diff(len) => {
-                    let out_pos = self.pos;
-                    //result.push([pos, pos + *len as i64]);
-                    self.pos += len as i64;
-                    self.cigar_index += 1;
-                    return Some([out_pos, out_pos + len as i64]);
-                }
-                Cigar::Del(len) => self.pos += len as i64,
-                Cigar::RefSkip(len) => self.pos += len as i64,
-                _ => (),
-            }
+        while self.cigar_index < self.raw_cigar.len() {
+            let raw = self.raw_cigar[self.cigar_index];
+            let op = cigar_op::op(raw);
+            let len = cigar_op::len(raw) as i64;
             self.cigar_index += 1;
+            let cr = cigar_op::consumes_ref(op);
+            let cq = cigar_op::consumes_query(op);
+            if cr && cq {
+                let out_pos = self.pos;
+                self.pos += len;
+                return Some([out_pos, out_pos + len]);
+            } else if cr {
+                self.pos += len;
+            }
         }
         None
     }
@@ -80,27 +79,24 @@ impl Iterator for IterAlignedBlocks {
 pub struct IterIntrons {
     pos: i64,
     cigar_index: usize,
-    cigar: CigarString,
+    raw_cigar: Box<[u32]>,
 }
 
 impl Iterator for IterIntrons {
     type Item = [i64; 2];
     fn next(&mut self) -> Option<Self::Item> {
-        while self.cigar_index < self.cigar.len() {
-            let entry = self.cigar[self.cigar_index];
-            match entry {
-                Cigar::Match(len) | Cigar::Equal(len) | Cigar::Diff(len) | Cigar::Del(len) => {
-                    self.pos += len as i64
-                }
-                Cigar::RefSkip(len) => {
-                    let junc_start = self.pos;
-                    self.pos += len as i64;
-                    self.cigar_index += 1;
-                    return Some([junc_start, self.pos]); //self.pos is  junc_start + len
-                }
-                _ => {}
-            }
+        while self.cigar_index < self.raw_cigar.len() {
+            let raw = self.raw_cigar[self.cigar_index];
+            let op = cigar_op::op(raw);
+            let len = cigar_op::len(raw) as i64;
             self.cigar_index += 1;
+            if op == cigar_op::REF_SKIP {
+                let junc_start = self.pos;
+                self.pos += len;
+                return Some([junc_start, self.pos]);
+            } else if cigar_op::consumes_ref(op) {
+                self.pos += len;
+            }
         }
         None
     }
@@ -109,7 +105,7 @@ impl Iterator for IterIntrons {
 pub struct IterAlignedPairs {
     genome_pos: i64,
     read_pos: i64,
-    cigar: CigarString,
+    raw_cigar: Box<[u32]>,
     remaining_match_bp: u32,
     cigar_index: usize,
 }
@@ -124,26 +120,27 @@ impl Iterator for IterAlignedPairs {
             return Some([self.read_pos - 1, self.genome_pos - 1]);
         }
 
-        while self.cigar_index < self.cigar.len() {
-            let entry = self.cigar[self.cigar_index];
-            match entry {
-                Cigar::Match(len) | Cigar::Equal(len) | Cigar::Diff(len) => {
-                    self.genome_pos += 1;
-                    self.read_pos += 1;
-                    self.remaining_match_bp = len - 1;
-                    self.cigar_index += 1;
-                    return Some([self.read_pos - 1, self.genome_pos - 1]);
-                }
-                Cigar::Ins(len) | Cigar::SoftClip(len) => {
-                    self.read_pos += len as i64;
-                }
-                Cigar::Del(len) | Cigar::RefSkip(len) => {
-                    self.genome_pos += len as i64;
-                }
-                Cigar::HardClip(_) => {} // no advance
-                Cigar::Pad(_) => panic!("Padding (Cigar::Pad) is not supported."), //padding is only used for multiple sequence alignment
-            }
+        while self.cigar_index < self.raw_cigar.len() {
+            let raw = self.raw_cigar[self.cigar_index];
+            let op = cigar_op::op(raw);
+            let len = cigar_op::len(raw);
             self.cigar_index += 1;
+            assert!(
+                op != cigar_op::PAD,
+                "Padding (Cigar::Pad) is not supported."
+            );
+            let cr = cigar_op::consumes_ref(op);
+            let cq = cigar_op::consumes_query(op);
+            if cr && cq {
+                self.genome_pos += 1;
+                self.read_pos += 1;
+                self.remaining_match_bp = len - 1;
+                return Some([self.read_pos - 1, self.genome_pos - 1]);
+            } else if cq {
+                self.read_pos += len as i64;
+            } else if cr {
+                self.genome_pos += len as i64;
+            }
         }
         None
     }
@@ -152,7 +149,7 @@ impl Iterator for IterAlignedPairs {
 pub struct IterAlignedPairsFull {
     genome_pos: i64,
     read_pos: i64,
-    cigar: CigarString,
+    raw_cigar: Box<[u32]>,
     remaining_match_bp: u32,
     remaining_ins_bp: u32,
     remaining_del_bp: u32,
@@ -179,34 +176,31 @@ impl Iterator for IterAlignedPairsFull {
             return Some([None, Some(self.genome_pos - 1)]);
         }
 
-        while self.cigar_index < self.cigar.len() {
-            let entry = self.cigar[self.cigar_index];
-            match entry {
-                Cigar::Match(len) | Cigar::Equal(len) | Cigar::Diff(len) => {
-                    self.genome_pos += 1;
-                    self.read_pos += 1;
-                    self.remaining_match_bp = len - 1;
-                    self.cigar_index += 1;
-                    return Some([Some(self.read_pos - 1), Some(self.genome_pos - 1)]);
-                }
-                Cigar::Ins(len) | Cigar::SoftClip(len) => {
-                    self.read_pos += 1;
-                    self.remaining_ins_bp = len - 1;
-                    self.cigar_index += 1;
-                    return Some([Some(self.read_pos - 1), None]);
-                }
-                Cigar::Del(len) | Cigar::RefSkip(len) => {
-                    self.genome_pos += 1;
-                    self.remaining_del_bp = len - 1;
-                    self.cigar_index += 1;
-                    return Some([None, Some(self.genome_pos - 1)]);
-                }
-                Cigar::HardClip(_) => {
-                    // no advance
-                }
-                Cigar::Pad(_) => panic!("Padding (Cigar::Pad) is not supported."), //padding is only used for multiple sequence alignment
-            }
+        while self.cigar_index < self.raw_cigar.len() {
+            let raw = self.raw_cigar[self.cigar_index];
+            let op = cigar_op::op(raw);
+            let len = cigar_op::len(raw);
             self.cigar_index += 1;
+            assert!(
+                op != cigar_op::PAD,
+                "Padding (Cigar::Pad) is not supported."
+            );
+            let cr = cigar_op::consumes_ref(op);
+            let cq = cigar_op::consumes_query(op);
+            if cr && cq {
+                self.genome_pos += 1;
+                self.read_pos += 1;
+                self.remaining_match_bp = len - 1;
+                return Some([Some(self.read_pos - 1), Some(self.genome_pos - 1)]);
+            } else if cq {
+                self.read_pos += 1;
+                self.remaining_ins_bp = len - 1;
+                return Some([Some(self.read_pos - 1), None]);
+            } else if cr {
+                self.genome_pos += 1;
+                self.remaining_del_bp = len - 1;
+                return Some([None, Some(self.genome_pos - 1)]);
+            }
         }
         None
     }
@@ -313,11 +307,31 @@ pub trait BamRecordExtensions {
     fn seq_len_from_cigar(&self, include_hard_clip: bool) -> usize;
 }
 
+/// Construct a `HashMap<Cigar, i32>` from a `[i32; 9]` array indexed by op code.
+fn cigar_counts_to_hashmap(counts: &[i32; 9]) -> HashMap<Cigar, i32> {
+    static KEYS: [fn(u32) -> Cigar; 9] = [
+        Cigar::Match,
+        Cigar::Ins,
+        Cigar::Del,
+        Cigar::RefSkip,
+        Cigar::SoftClip,
+        Cigar::HardClip,
+        Cigar::Pad,
+        Cigar::Equal,
+        Cigar::Diff,
+    ];
+    let mut result = HashMap::with_capacity(9);
+    for (i, &count) in counts.iter().enumerate() {
+        result.insert(KEYS[i](0), count);
+    }
+    result
+}
+
 impl BamRecordExtensions for bam::Record {
     fn aligned_blocks(&self) -> IterAlignedBlocks {
         IterAlignedBlocks {
             pos: self.pos(),
-            cigar: self.cigar().take(),
+            raw_cigar: self.raw_cigar().into(),
             cigar_index: 0,
         }
     }
@@ -325,7 +339,7 @@ impl BamRecordExtensions for bam::Record {
     fn introns(&self) -> IterIntrons {
         IterIntrons {
             pos: self.pos(),
-            cigar: self.cigar().take(),
+            raw_cigar: self.raw_cigar().into(),
             cigar_index: 0,
         }
     }
@@ -334,7 +348,7 @@ impl BamRecordExtensions for bam::Record {
         IterAlignedBlockPairs {
             genome_pos: self.pos(),
             read_pos: 0,
-            cigar: self.cigar().take(),
+            raw_cigar: self.raw_cigar().into(),
             cigar_index: 0,
         }
     }
@@ -343,7 +357,7 @@ impl BamRecordExtensions for bam::Record {
         IterAlignedPairs {
             genome_pos: self.pos(),
             read_pos: 0,
-            cigar: self.cigar().take(),
+            raw_cigar: self.raw_cigar().into(),
             remaining_match_bp: 0,
             cigar_index: 0,
         }
@@ -353,7 +367,7 @@ impl BamRecordExtensions for bam::Record {
         IterAlignedPairsFull {
             genome_pos: self.pos(),
             read_pos: 0,
-            cigar: self.cigar().take(),
+            raw_cigar: self.raw_cigar().into(),
             remaining_match_bp: 0,
             remaining_ins_bp: 0,
             remaining_del_bp: 0,
@@ -362,61 +376,20 @@ impl BamRecordExtensions for bam::Record {
     }
 
     fn cigar_stats_nucleotides(&self) -> HashMap<Cigar, i32> {
-        let mut result = HashMap::new();
-        result.insert(Cigar::Match(0), 0); // M
-        result.insert(Cigar::Ins(0), 0); // I
-        result.insert(Cigar::Del(0), 0); // D
-        result.insert(Cigar::RefSkip(0), 0); // N
-        result.insert(Cigar::SoftClip(0), 0); // S
-        result.insert(Cigar::HardClip(0), 0); // H
-        result.insert(Cigar::Pad(0), 0); // P
-        result.insert(Cigar::Equal(0), 0); // =
-        result.insert(Cigar::Diff(0), 0); // X
-        for entry in self.cigar().iter() {
-            match entry {
-                Cigar::Match(len) => *result.get_mut(&Cigar::Match(0)).unwrap() += *len as i32, // M
-                Cigar::Ins(len) => *result.get_mut(&Cigar::Ins(0)).unwrap() += *len as i32,     // I
-                Cigar::Del(len) => *result.get_mut(&Cigar::Del(0)).unwrap() += *len as i32,     // D
-                Cigar::RefSkip(len) => *result.get_mut(&Cigar::RefSkip(0)).unwrap() += *len as i32, // N
-                Cigar::SoftClip(len) => {
-                    *result.get_mut(&Cigar::SoftClip(0)).unwrap() += *len as i32
-                } // S
-                Cigar::HardClip(len) => {
-                    *result.get_mut(&Cigar::HardClip(0)).unwrap() += *len as i32
-                } // H
-                Cigar::Pad(len) => *result.get_mut(&Cigar::Pad(0)).unwrap() += *len as i32, // P
-                Cigar::Equal(len) => *result.get_mut(&Cigar::Equal(0)).unwrap() += *len as i32, // =
-                Cigar::Diff(len) => *result.get_mut(&Cigar::Diff(0)).unwrap() += *len as i32, // X
-            }
+        let mut counts = [0i32; 9];
+        for &raw in self.raw_cigar() {
+            let op = cigar_op::op(raw) as usize;
+            counts[op] += cigar_op::len(raw) as i32;
         }
-        result
+        cigar_counts_to_hashmap(&counts)
     }
 
     fn cigar_stats_blocks(&self) -> HashMap<Cigar, i32> {
-        let mut result = HashMap::new();
-        result.insert(Cigar::Match(0), 0); // M
-        result.insert(Cigar::Ins(0), 0); // I
-        result.insert(Cigar::Del(0), 0); // D
-        result.insert(Cigar::RefSkip(0), 0); // N
-        result.insert(Cigar::SoftClip(0), 0); // S
-        result.insert(Cigar::HardClip(0), 0); // H
-        result.insert(Cigar::Pad(0), 0); // P
-        result.insert(Cigar::Equal(0), 0); // =
-        result.insert(Cigar::Diff(0), 0); // X
-        for entry in self.cigar().iter() {
-            match entry {
-                Cigar::Match(_) => *result.get_mut(&Cigar::Match(0)).unwrap() += 1, // M
-                Cigar::Ins(_) => *result.get_mut(&Cigar::Ins(0)).unwrap() += 1,     // I
-                Cigar::Del(_) => *result.get_mut(&Cigar::Del(0)).unwrap() += 1,     // D
-                Cigar::RefSkip(_) => *result.get_mut(&Cigar::RefSkip(0)).unwrap() += 1, // N
-                Cigar::SoftClip(_) => *result.get_mut(&Cigar::SoftClip(0)).unwrap() += 1, // S
-                Cigar::HardClip(_) => *result.get_mut(&Cigar::HardClip(0)).unwrap() += 1, // H
-                Cigar::Pad(_) => *result.get_mut(&Cigar::Pad(0)).unwrap() += 1,     // P
-                Cigar::Equal(_) => *result.get_mut(&Cigar::Equal(0)).unwrap() += 1, // =
-                Cigar::Diff(_) => *result.get_mut(&Cigar::Diff(0)).unwrap() += 1,   // X
-            }
+        let mut counts = [0i32; 9];
+        for &raw in self.raw_cigar() {
+            counts[cigar_op::op(raw) as usize] += 1;
         }
-        result
+        cigar_counts_to_hashmap(&counts)
     }
 
     fn reference_positions(&self) -> Box<dyn Iterator<Item = i64>> {
@@ -442,22 +415,12 @@ impl BamRecordExtensions for bam::Record {
     }
 
     fn seq_len_from_cigar(&self, include_hard_clip: bool) -> usize {
-        let mut result = 0;
-        for entry in self.cigar().iter() {
-            match entry {
-                Cigar::Match(len)
-                | Cigar::Ins(len)
-                | Cigar::SoftClip(len)
-                | Cigar::Equal(len)
-                | Cigar::Diff(len) => {
-                    result += len;
-                }
-                Cigar::HardClip(len) => {
-                    if include_hard_clip {
-                        result += len;
-                    }
-                }
-                _ => {}
+        let mut result = 0u32;
+        for &raw in self.raw_cigar() {
+            let op = cigar_op::op(raw);
+            let len = cigar_op::len(raw);
+            if cigar_op::consumes_query(op) || (include_hard_clip && op == cigar_op::HARD_CLIP) {
+                result += len;
             }
         }
         result as usize

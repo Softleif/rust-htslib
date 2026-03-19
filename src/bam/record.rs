@@ -618,21 +618,7 @@ impl Record {
         CigarString(
             self.raw_cigar()
                 .iter()
-                .map(|&c| {
-                    let len = c >> 4;
-                    match c & 0b1111 {
-                        0 => Cigar::Match(len),
-                        1 => Cigar::Ins(len),
-                        2 => Cigar::Del(len),
-                        3 => Cigar::RefSkip(len),
-                        4 => Cigar::SoftClip(len),
-                        5 => Cigar::HardClip(len),
-                        6 => Cigar::Pad(len),
-                        7 => Cigar::Equal(len),
-                        8 => Cigar::Diff(len),
-                        _ => panic!("Unexpected cigar operation"),
-                    }
-                })
+                .map(|&c| Cigar::from_raw(c))
                 .collect(),
         )
         .into_view(self.pos())
@@ -2321,7 +2307,86 @@ pub enum Cigar {
     Diff(u32),     // X
 }
 
+/// BAM CIGAR operation codes and utilities for working with raw-encoded
+/// CIGAR values (u32 where low 4 bits = op, upper 28 bits = length).
+pub mod cigar_op {
+    /// M — alignment match (can be a sequence match or mismatch)
+    pub const MATCH: u32 = 0;
+    /// I — insertion to the reference
+    pub const INS: u32 = 1;
+    /// D — deletion from the reference
+    pub const DEL: u32 = 2;
+    /// N — skipped region from the reference (e.g. intron)
+    pub const REF_SKIP: u32 = 3;
+    /// S — soft clipping (clipped sequences present in SEQ)
+    pub const SOFT_CLIP: u32 = 4;
+    /// H — hard clipping (clipped sequences NOT present in SEQ)
+    pub const HARD_CLIP: u32 = 5;
+    /// P — padding (silent deletion from padded reference)
+    pub const PAD: u32 = 6;
+    /// = — sequence match
+    pub const EQUAL: u32 = 7;
+    /// X — sequence mismatch
+    pub const DIFF: u32 = 8;
+
+    /// Bitmask of ops that consume query/read bases: M(0), I(1), S(4), =(7), X(8).
+    const QUERY_MASK: u16 =
+        (1 << MATCH) | (1 << INS) | (1 << SOFT_CLIP) | (1 << EQUAL) | (1 << DIFF);
+    /// Bitmask of ops that consume reference bases: M(0), D(2), N(3), =(7), X(8).
+    const REF_MASK: u16 = (1 << MATCH) | (1 << DEL) | (1 << REF_SKIP) | (1 << EQUAL) | (1 << DIFF);
+
+    /// Whether a raw CIGAR operation code consumes query/read bases.
+    #[inline(always)]
+    pub fn consumes_query(op: u32) -> bool {
+        (QUERY_MASK >> op) & 1 != 0
+    }
+
+    /// Whether a raw CIGAR operation code consumes reference bases.
+    #[inline(always)]
+    pub fn consumes_ref(op: u32) -> bool {
+        (REF_MASK >> op) & 1 != 0
+    }
+
+    /// Extract the operation code (low 4 bits) from a raw CIGAR u32.
+    #[inline(always)]
+    pub fn op(raw: u32) -> u32 {
+        raw & 0xF
+    }
+
+    /// Extract the length (upper 28 bits) from a raw CIGAR u32.
+    #[inline(always)]
+    pub fn len(raw: u32) -> u32 {
+        raw >> 4
+    }
+}
+
 impl Cigar {
+    /// Decode a raw BAM CIGAR u32 into a `Cigar` variant.
+    ///
+    /// In BAM format, each CIGAR operation is stored as a u32 where the
+    /// low 4 bits encode the operation type and the upper 28 bits encode
+    /// the length.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the operation code (low 4 bits) is not in the range 0..=8.
+    #[inline]
+    pub fn from_raw(raw: u32) -> Self {
+        let len = raw >> 4;
+        match raw & 0xF {
+            0 => Cigar::Match(len),
+            1 => Cigar::Ins(len),
+            2 => Cigar::Del(len),
+            3 => Cigar::RefSkip(len),
+            4 => Cigar::SoftClip(len),
+            5 => Cigar::HardClip(len),
+            6 => Cigar::Pad(len),
+            7 => Cigar::Equal(len),
+            8 => Cigar::Diff(len),
+            op => panic!("unexpected CIGAR operation code: {}", op),
+        }
+    }
+
     fn encode(self) -> u32 {
         match self {
             Cigar::Match(len) => len << 4, // | 0,

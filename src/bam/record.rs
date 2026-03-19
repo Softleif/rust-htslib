@@ -1261,7 +1261,8 @@ impl genome::AbstractInterval for Record {
                 .expect(
                     "header must be set (this is the case if the record has been read from a file)",
                 )
-                .tid2name(tid as u32),
+                .tid2name(tid as u32)
+                .expect("tid out of bounds"),
         )
         .expect("unable to interpret contig name as UTF-8")
     }

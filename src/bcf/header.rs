@@ -445,18 +445,19 @@ impl HeaderView {
     /// Convert integer representing an identifier (e.g., a `FILTER` value) to its string
     /// name.
     ///
-    /// # Panics
-    ///
-    /// Panics if `id` is out of bounds.
-    pub fn id_to_name(&self, id: Id) -> Vec<u8> {
+    pub fn id_to_name(&self, id: Id) -> Result<Vec<u8>> {
         let n = unsafe { (*self.inner).n[htslib::BCF_DT_ID as usize] } as u32;
-        assert!(*id < n, "id {} is out of bounds (count = {})", *id, n);
+        if *id >= n {
+            return Err(Error::UnknownID {
+                id: format!("{}", *id),
+            });
+        }
         let key = unsafe {
             ffi::CStr::from_ptr(
                 (*(*self.inner).id[htslib::BCF_DT_ID as usize].offset(*id as isize)).key,
             )
         };
-        key.to_bytes().to_vec()
+        Ok(key.to_bytes().to_vec())
     }
 
     /// Convert string sample name to its numeric identifier.
@@ -477,23 +478,18 @@ impl HeaderView {
     }
 
     /// Convert integer representing a sample to its name.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `id` is out of bounds.
-    pub fn id_to_sample(&self, id: Id) -> Vec<u8> {
-        assert!(
-            *id < self.sample_count(),
-            "sample id {} is out of bounds (sample_count = {})",
-            *id,
-            self.sample_count()
-        );
+    pub fn id_to_sample(&self, id: Id) -> Result<Vec<u8>> {
+        if *id >= self.sample_count() {
+            return Err(Error::UnknownSample {
+                name: format!("{}", *id),
+            });
+        }
         let key = unsafe {
             ffi::CStr::from_ptr(
                 (*(*self.inner).id[htslib::BCF_DT_SAMPLE as usize].offset(*id as isize)).key,
             )
         };
-        key.to_bytes().to_vec()
+        Ok(key.to_bytes().to_vec())
     }
 
     /// Return structured `HeaderRecord`s.
@@ -677,16 +673,15 @@ mod tests {
         let vcf = Reader::from_path("test/test_string.vcf").expect("Error opening file");
         let header = vcf.header();
         // PASS filter always exists as id 0
-        let name = header.id_to_name(Id(0));
+        let name = header.id_to_name(Id(0)).unwrap();
         assert!(!name.is_empty());
     }
 
     #[test]
-    #[should_panic(expected = "out of bounds")]
     fn test_id_to_name_out_of_bounds() {
         let vcf = Reader::from_path("test/test_string.vcf").expect("Error opening file");
         let header = vcf.header();
-        header.id_to_name(Id(u32::MAX));
+        assert!(header.id_to_name(Id(u32::MAX)).is_err());
     }
 
     #[test]
@@ -695,16 +690,15 @@ mod tests {
         let header = vcf.header();
         assert!(header.sample_count() > 0);
         for i in 0..header.sample_count() {
-            let name = header.id_to_sample(Id(i));
+            let name = header.id_to_sample(Id(i)).unwrap();
             assert!(!name.is_empty());
         }
     }
 
     #[test]
-    #[should_panic(expected = "out of bounds")]
     fn test_id_to_sample_out_of_bounds() {
         let vcf = Reader::from_path("test/test_string.vcf").expect("Error opening file");
         let header = vcf.header();
-        header.id_to_sample(Id(header.sample_count()));
+        assert!(header.id_to_sample(Id(header.sample_count())).is_err());
     }
 }

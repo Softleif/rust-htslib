@@ -1615,17 +1615,14 @@ impl HeaderView {
         }
     }
 
-    pub fn tid2name(&self, tid: u32) -> &[u8] {
+    pub fn tid2name(&self, tid: u32) -> Result<&[u8]> {
         // sam_hdr_tid2name returns NULL for out-of-bounds tids.
         // CStr::from_ptr on NULL is UB, so we must check first.
         let ptr = unsafe { htslib::sam_hdr_tid2name(self.inner, tid as i32) };
-        assert!(
-            !ptr.is_null(),
-            "tid {} is out of bounds (target_count = {})",
-            tid,
-            self.target_count()
-        );
-        unsafe { ffi::CStr::from_ptr(ptr).to_bytes() }
+        if ptr.is_null() {
+            return Err(Error::InvalidTid { tid: tid as i32 });
+        }
+        Ok(unsafe { ffi::CStr::from_ptr(ptr).to_bytes() })
     }
 
     pub fn target_count(&self) -> u32 {
@@ -3380,26 +3377,17 @@ CCCCCCCCCCCCCCCCCCC"[..],
         let bam = Reader::from_path("test/test.bam").expect("Error opening file.");
         let header = bam.header();
         assert!(header.target_count() > 0);
-        // All valid tids should return a name
         for tid in 0..header.target_count() {
-            let name = header.tid2name(tid);
+            let name = header.tid2name(tid).unwrap();
             assert!(!name.is_empty());
         }
     }
 
     #[test]
-    #[should_panic(expected = "out of bounds")]
     fn test_tid2name_out_of_bounds() {
         let bam = Reader::from_path("test/test.bam").expect("Error opening file.");
         let header = bam.header();
-        header.tid2name(header.target_count());
-    }
-
-    #[test]
-    #[should_panic(expected = "out of bounds")]
-    fn test_tid2name_way_out_of_bounds() {
-        let bam = Reader::from_path("test/test.bam").expect("Error opening file.");
-        let header = bam.header();
-        header.tid2name(u32::MAX);
+        assert!(header.tid2name(header.target_count()).is_err());
+        assert!(header.tid2name(u32::MAX).is_err());
     }
 }

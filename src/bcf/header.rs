@@ -337,7 +337,7 @@ impl HeaderView {
     }
 
     pub fn rid2name(&self, rid: u32) -> Result<&[u8]> {
-        if rid <= self.contig_count() {
+        if rid < self.contig_count() {
             unsafe {
                 let dict = self.inner().id[htslib::BCF_DT_CTG as usize];
                 let ptr = (*dict.offset(rid as isize)).key;
@@ -443,8 +443,14 @@ impl HeaderView {
     }
 
     /// Convert integer representing an identifier (e.g., a `FILTER` value) to its string
-    /// name.bam.
+    /// name.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `id` is out of bounds.
     pub fn id_to_name(&self, id: Id) -> Vec<u8> {
+        let n = unsafe { (*self.inner).n[htslib::BCF_DT_ID as usize] } as u32;
+        assert!(*id < n, "id {} is out of bounds (count = {})", *id, n);
         let key = unsafe {
             ffi::CStr::from_ptr(
                 (*(*self.inner).id[htslib::BCF_DT_ID as usize].offset(*id as isize)).key,
@@ -470,8 +476,18 @@ impl HeaderView {
         }
     }
 
-    /// Convert integer representing an contig to its name.
+    /// Convert integer representing a sample to its name.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `id` is out of bounds.
     pub fn id_to_sample(&self, id: Id) -> Vec<u8> {
+        assert!(
+            *id < self.sample_count(),
+            "sample id {} is out of bounds (sample_count = {})",
+            *id,
+            self.sample_count()
+        );
         let key = unsafe {
             ffi::CStr::from_ptr(
                 (*(*self.inner).id[htslib::BCF_DT_SAMPLE as usize].offset(*id as isize)).key,
@@ -582,7 +598,7 @@ pub enum TagLength {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bcf::Reader;
+    use crate::bcf::{Read, Reader};
     use crate::htslib;
 
     #[test]
@@ -634,5 +650,61 @@ mod tests {
         };
 
         assert_eq!(version, "VCFv4.1");
+    }
+
+    #[test]
+    fn test_rid2name_valid() {
+        let vcf = Reader::from_path("test/test_string.vcf").expect("Error opening file");
+        let header = vcf.header();
+        assert!(header.contig_count() > 0);
+        for rid in 0..header.contig_count() {
+            assert!(header.rid2name(rid).is_ok());
+        }
+    }
+
+    #[test]
+    fn test_rid2name_out_of_bounds() {
+        let vcf = Reader::from_path("test/test_string.vcf").expect("Error opening file");
+        let header = vcf.header();
+        // Exactly at contig_count should fail (was an off-by-one bug)
+        assert!(header.rid2name(header.contig_count()).is_err());
+        assert!(header.rid2name(header.contig_count() + 1).is_err());
+        assert!(header.rid2name(u32::MAX).is_err());
+    }
+
+    #[test]
+    fn test_id_to_name_valid_roundtrip() {
+        let vcf = Reader::from_path("test/test_string.vcf").expect("Error opening file");
+        let header = vcf.header();
+        // PASS filter always exists as id 0
+        let name = header.id_to_name(Id(0));
+        assert!(!name.is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "out of bounds")]
+    fn test_id_to_name_out_of_bounds() {
+        let vcf = Reader::from_path("test/test_string.vcf").expect("Error opening file");
+        let header = vcf.header();
+        header.id_to_name(Id(u32::MAX));
+    }
+
+    #[test]
+    fn test_id_to_sample_valid() {
+        let vcf = Reader::from_path("test/test_string.vcf").expect("Error opening file");
+        let header = vcf.header();
+        assert!(header.sample_count() > 0);
+        for i in 0..header.sample_count() {
+            let name = header.id_to_sample(Id(i));
+            assert!(!name.is_empty());
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "out of bounds")]
+    fn test_id_to_sample_out_of_bounds() {
+        let vcf = Reader::from_path("test/test_string.vcf").expect("Error opening file");
+        let header = vcf.header();
+        header.id_to_sample(Id(header.sample_count()));
     }
 }

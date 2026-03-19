@@ -1912,6 +1912,17 @@ impl Seq<'_> {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Return decoded base at given position, or `None` if out of bounds.
+    /// Complexity: O(1).
+    #[inline]
+    pub fn get(&self, index: usize) -> Option<u8> {
+        if index < self.len {
+            Some(*decode_base_unchecked(self.encoded_base(index)))
+        } else {
+            None
+        }
+    }
 }
 
 impl ops::Index<usize> for Seq<'_> {

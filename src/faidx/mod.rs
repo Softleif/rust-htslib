@@ -161,6 +161,11 @@ impl Reader {
 
     /// Fetches the i-th sequence name.
     pub fn seq_name(&self, i: i32) -> Result<String, FaidxError> {
+        // faidx_iseq does no bounds checking (it indexes directly into an
+        // array), so we must validate the index before calling it.
+        if i < 0 || (i as u64) >= self.n_seqs() {
+            return Err(FaidxError::InvalidSequenceName { index: i });
+        }
         let ptr = unsafe { htslib::faidx_iseq(self.inner, i) };
         if ptr.is_null() {
             return Err(FaidxError::InvalidSequenceName { index: i });
@@ -322,6 +327,40 @@ mod tests {
         let r = open_reader();
         let n = r.seq_name(1).unwrap();
         assert_eq!(n, "chr2");
+    }
+
+    #[test]
+    fn faidx_seq_name_all_valid_indices() {
+        let r = open_reader();
+        assert_eq!(r.seq_name(0).unwrap(), "chr1");
+        assert_eq!(r.seq_name(1).unwrap(), "chr2");
+        assert_eq!(r.seq_name(2).unwrap(), "chr3");
+    }
+
+    #[test]
+    fn faidx_seq_name_boundary() {
+        // n_seqs() == 3, so index 2 is the last valid and 3 is the first invalid.
+        // faidx_iseq does no bounds checking in C, so calling it with an
+        // out-of-bounds index would segfault without our Rust-side guard.
+        let r = open_reader();
+        assert!(r.seq_name(2).is_ok());
+        assert!(matches!(
+            r.seq_name(3),
+            Err(FaidxError::InvalidSequenceName { index: 3 })
+        ));
+    }
+
+    #[test]
+    fn faidx_seq_name_i32_extremes() {
+        let r = open_reader();
+        assert!(matches!(
+            r.seq_name(i32::MAX),
+            Err(FaidxError::InvalidSequenceName { index: i32::MAX })
+        ));
+        assert!(matches!(
+            r.seq_name(i32::MIN),
+            Err(FaidxError::InvalidSequenceName { index: i32::MIN })
+        ));
     }
 
     #[test]

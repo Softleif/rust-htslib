@@ -191,6 +191,11 @@ pub struct Reader {
     /// Iterator over the buffer.
     itr: Option<*mut htslib::hts_itr_t>,
 
+    /// Cached sequence names (populated once at construction).
+    cached_seqnames: Vec<String>,
+    /// Cached name→tid lookup (populated once at construction).
+    tid_by_name: std::collections::HashMap<String, u64>,
+
     /// The currently fetch region's tid.
     tid: i64,
     /// The currently fetch region's 0-based begin pos.
@@ -263,6 +268,29 @@ impl Reader {
             }
         }
 
+        // Build sequence name and tid caches from C tbx_seqnames + tbx_name2id.
+        let (cached_seqnames, tid_by_name) = unsafe {
+            let mut nseq: i32 = 0;
+            let seqs = htslib::tbx_seqnames(tbx, &mut nseq);
+            let mut names = Vec::with_capacity(nseq.max(0) as usize);
+            let mut tids = std::collections::HashMap::with_capacity(nseq.max(0) as usize);
+            for i in 0..nseq {
+                let ptr = *seqs.offset(i as isize);
+                if !ptr.is_null() {
+                    if let Ok(s) = ffi::CStr::from_ptr(ptr).to_str() {
+                        let name = s.to_owned();
+                        let id = htslib::tbx_name2id(tbx, ptr);
+                        if id >= 0 {
+                            tids.insert(name.clone(), id as u64);
+                        }
+                        names.push(name);
+                    }
+                }
+            }
+            libc::free(seqs as *mut libc::c_void);
+            (names, tids)
+        };
+
         Ok(Reader {
             header,
             hts_file,
@@ -270,6 +298,8 @@ impl Reader {
             tbx,
             buf,
             itr: None,
+            cached_seqnames,
+            tid_by_name,
             tid: -1,
             start: -1,
             end: -1,
@@ -278,16 +308,12 @@ impl Reader {
 
     /// Get sequence/target ID from sequence name.
     pub fn tid(&self, name: &str) -> Result<u64> {
-        let name_cstr = ffi::CString::new(name.as_bytes()).map_err(|_| TbxError::NullByte)?;
-        // SAFETY: self.tbx is non-null (from constructor); name_cstr is valid.
-        let res = unsafe { htslib::tbx_name2id(self.tbx, name_cstr.as_ptr()) };
-        if res < 0 {
-            Err(TbxError::SequenceNotFound {
+        self.tid_by_name
+            .get(name)
+            .copied()
+            .ok_or_else(|| TbxError::SequenceNotFound {
                 name: name.to_owned(),
             })
-        } else {
-            Ok(res as u64)
-        }
     }
 
     /// Fetch region given by numeric sequence number and 0-based begin and end position.
@@ -323,29 +349,7 @@ impl Reader {
 
     /// Return the sequence contig names.
     pub fn seqnames(&self) -> Vec<String> {
-        let mut result = Vec::new();
-
-        let mut nseq: i32 = 0;
-        // SAFETY: self.tbx is non-null. tbx_seqnames returns an array of nseq
-        // pointers. If nseq == 0 the loop body never runs, so a null seqs is
-        // harmless (only freed below, and libc::free(null) is a no-op).
-        // FIXME: .unwrap() on .to_str() will panic on non-UTF-8 sequence names.
-        let seqs = unsafe { htslib::tbx_seqnames(self.tbx, &mut nseq) };
-        for i in 0..nseq {
-            unsafe {
-                result.push(String::from(
-                    ffi::CStr::from_ptr(*seqs.offset(i as isize))
-                        .to_str()
-                        .unwrap(),
-                ));
-            }
-        }
-        // SAFETY: seqs was allocated by htslib; freed exactly once.
-        unsafe {
-            libc::free(seqs as *mut libc::c_void);
-        };
-
-        result
+        self.cached_seqnames.clone()
     }
 
     /// Activate multi-threaded BGZF read support in htslib. This should permit faster
@@ -548,5 +552,75 @@ mod tests {
         // This is a duplicate of the above file but the index file is nonsense text.
         Reader::from_path("test/tabix_reader/bad_header.txt.gz")
             .expect_err("Invalid index file should fail.");
+    }
+}
+
+#[cfg(test)]
+mod tbx_accessor_tests {
+    use super::*;
+
+    /// Call C tbx_name2id as oracle.
+    fn tid_c(reader: &Reader, name: &str) -> i32 {
+        let c_str = ffi::CString::new(name).unwrap();
+        unsafe { htslib::tbx_name2id(reader.tbx, c_str.as_ptr()) }
+    }
+
+    /// Call C tbx_seqnames as oracle.
+    fn seqnames_c(reader: &Reader) -> Vec<String> {
+        let mut nseq: i32 = 0;
+        let seqs = unsafe { htslib::tbx_seqnames(reader.tbx, &mut nseq) };
+        let mut result = Vec::new();
+        for i in 0..nseq {
+            unsafe {
+                let name = ffi::CStr::from_ptr(*seqs.offset(i as isize))
+                    .to_str()
+                    .unwrap()
+                    .to_owned();
+                result.push(name);
+            }
+        }
+        unsafe { libc::free(seqs as *mut libc::c_void) };
+        result
+    }
+
+    #[test]
+    fn tid_matches_c_for_all_seqnames() {
+        let reader =
+            Reader::from_path("test/tabix_reader/test_bed3.bed.gz").expect("Error opening file.");
+        let names = reader.seqnames();
+        for name in &names {
+            let c_tid = tid_c(&reader, name);
+            let rs_tid = reader.tid(name);
+            assert_eq!(rs_tid.unwrap(), c_tid as u64, "tid mismatch for {name}");
+        }
+    }
+
+    #[test]
+    fn tid_matches_c_for_absent_names() {
+        let reader =
+            Reader::from_path("test/tabix_reader/test_bed3.bed.gz").expect("Error opening file.");
+        for name in ["chrZ", "nonexistent", "MT"] {
+            let c_tid = tid_c(&reader, name);
+            assert_eq!(c_tid, -1);
+            assert!(reader.tid(name).is_err());
+        }
+    }
+
+    #[test]
+    fn seqnames_matches_c() {
+        let reader =
+            Reader::from_path("test/tabix_reader/test_bed3.bed.gz").expect("Error opening file.");
+        let c_names = seqnames_c(&reader);
+        let rs_names = reader.seqnames();
+        assert_eq!(c_names, rs_names);
+    }
+
+    #[test]
+    fn seqnames_and_tid_roundtrip() {
+        let reader =
+            Reader::from_path("test/tabix_reader/test_bed3.bed.gz").expect("Error opening file.");
+        for (i, name) in reader.seqnames().iter().enumerate() {
+            assert_eq!(reader.tid(name).unwrap(), i as u64);
+        }
     }
 }

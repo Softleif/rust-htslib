@@ -1,0 +1,10 @@
+{
+  "uuid": "03365057-d5ae-47d6-944c-decdff6c3fc0",
+  "display_id": 65,
+  "title": "Evaluate bgzf/noodles-bgzf crate for pure Rust BGZF I/O",
+  "status": "open",
+  "priority": "medium",
+  "created_by": "anon-df5e95db",
+  "created_at": "2026-03-20T14:36:42.015876Z",
+  "updated_at": "2026-03-20T14:36:42.015876Z"
+}

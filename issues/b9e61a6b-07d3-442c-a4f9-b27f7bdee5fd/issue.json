@@ -1,0 +1,11 @@
+{
+  "uuid": "b9e61a6b-07d3-442c-a4f9-b27f7bdee5fd",
+  "display_id": 10,
+  "title": "Replace SAM header leaves (sam_hdr_tid2name, sam_hdr_name2tid, sam_hdr_str, sam_hdr_line_name, sam_hdr_destroy, sam_hdr_parse) with pure Rust",
+  "description": "Replace 6 SAM header FFI leaf functions with pure Rust: sam_hdr_tid2name (14 lines, array access), sam_hdr_name2tid (18 lines, hash lookup), sam_hdr_str (6 lines, accessor), sam_hdr_line_name (40 lines, switch lookup), sam_hdr_destroy (24 lines, refcounted cleanup), sam_hdr_parse (12 lines, text parsing). Used in src/bam/mod.rs. Complexity: trivial-easy.",
+  "status": "open",
+  "priority": "medium",
+  "created_by": "driver--implement-issue-1-95f4",
+  "created_at": "2026-03-20T08:37:52.546429Z",
+  "updated_at": "2026-03-20T08:37:52.546429Z"
+}

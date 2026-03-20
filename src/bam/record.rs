@@ -593,6 +593,161 @@ impl Record {
         self.own = true;
     }
 
+    /// Byte offset of the aux data region within `bam1_t.data`.
+    fn aux_data_offset(&self) -> usize {
+        self.qname_capacity()
+            + self.cigar_len() * std::mem::size_of::<u32>()
+            + self.seq_len().div_ceil(2)
+            + self.seq_len()
+    }
+
+    /// Write or replace a single aux field in the record's data buffer.
+    ///
+    /// If `tag` already exists the field is resized (bytes after it are shifted) and
+    /// overwritten in place.  If `tag` is absent the field is appended at the end.
+    ///
+    /// `new_type` is the BAM type byte (e.g. `b'c'`, `b'Z'`, `b'B'`).
+    /// `payload` is the raw payload bytes (excluding the 2-byte tag and 1-byte type).
+    fn aux_update_field(&mut self, tag: &[u8], new_type: u8, payload: &[u8]) -> Result<()> {
+        let aux_offset = self.aux_data_offset();
+
+        // Capture search result and old payload size before any mutable access.
+        let existing: Option<(usize, usize)> = {
+            let raw = self.raw_aux_data();
+            aux_tag_search(raw, tag).map(|type_offset| {
+                let type_byte = raw[type_offset];
+                let old_size = aux_payload_size(type_byte, &raw[type_offset + 1..]);
+                (type_offset, old_size.unwrap_or(usize::MAX))
+            })
+        };
+
+        match existing {
+            Some((_, usize::MAX)) => Err(Error::AuxParsingError),
+            Some((type_offset, old_payload_size)) => {
+                let new_payload_size = payload.len();
+                let abs_type_offset = aux_offset + type_offset;
+                let l_data = self.inner().l_data as usize;
+
+                if old_payload_size != new_payload_size {
+                    let old_end = abs_type_offset + 1 + old_payload_size;
+                    let new_end = abs_type_offset + 1 + new_payload_size;
+                    let new_l_data = l_data - old_payload_size + new_payload_size;
+
+                    if new_l_data > self.inner().m_data as usize {
+                        self.realloc_var_data(new_l_data);
+                    }
+                    // SAFETY: old_end ≤ l_data; ptr::copy handles overlapping regions.
+                    unsafe {
+                        let data = self.inner.data;
+                        std::ptr::copy(data.add(old_end), data.add(new_end), l_data - old_end);
+                        self.inner_mut().l_data = new_l_data as i32;
+                    }
+                }
+
+                // SAFETY: abs_type_offset + 1 + new_payload_size ≤ l_data.
+                unsafe {
+                    let data = self.inner.data;
+                    *data.add(abs_type_offset) = new_type;
+                    std::ptr::copy_nonoverlapping(
+                        payload.as_ptr(),
+                        data.add(abs_type_offset + 1),
+                        new_payload_size,
+                    );
+                }
+                Ok(())
+            }
+            None => {
+                // Append: [tag0, tag1, type, payload...]
+                let l_data = self.inner().l_data as usize;
+                let new_l_data = l_data + 2 + 1 + payload.len();
+
+                if new_l_data > self.inner().m_data as usize {
+                    self.realloc_var_data(new_l_data);
+                }
+                // SAFETY: new_l_data ≤ m_data after optional realloc.
+                unsafe {
+                    let data = self.inner.data;
+                    *data.add(l_data) = tag[0];
+                    *data.add(l_data + 1) = tag[1];
+                    *data.add(l_data + 2) = new_type;
+                    std::ptr::copy_nonoverlapping(
+                        payload.as_ptr(),
+                        data.add(l_data + 3),
+                        payload.len(),
+                    );
+                    self.inner_mut().l_data = new_l_data as i32;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Pure Rust replacement for `htslib::bam_aux_update_int`.
+    ///
+    /// Chooses the minimal integer encoding (unsigned preferred for non-negative
+    /// values, signed otherwise) and writes/appends the field.
+    fn aux_update_int(&mut self, tag: &[u8], value: i64) -> Result<()> {
+        if value >= 0 {
+            if value <= 0xFF {
+                self.aux_update_field(tag, b'C', &[value as u8])
+            } else if value <= 0xFFFF {
+                self.aux_update_field(tag, b'S', &(value as u16).to_le_bytes())
+            } else if value <= 0xFFFF_FFFF {
+                self.aux_update_field(tag, b'I', &(value as u32).to_le_bytes())
+            } else {
+                Err(Error::Aux)
+            }
+        } else if value >= -128 {
+            self.aux_update_field(tag, b'c', &[value as i8 as u8])
+        } else if value >= -32768 {
+            self.aux_update_field(tag, b's', &(value as i16).to_le_bytes())
+        } else if value >= -2_147_483_648 {
+            self.aux_update_field(tag, b'i', &(value as i32).to_le_bytes())
+        } else {
+            Err(Error::Aux)
+        }
+    }
+
+    /// Pure Rust replacement for `htslib::bam_aux_update_float`.
+    fn aux_update_float(&mut self, tag: &[u8], value: f32) -> Result<()> {
+        self.aux_update_field(tag, b'f', &value.to_le_bytes())
+    }
+
+    /// Pure Rust replacement for `htslib::bam_aux_update_str`.
+    ///
+    /// Writes a `Z`-typed field with a NUL-terminated payload. Returns
+    /// `Error::AuxStringError` if `value` contains an embedded NUL byte.
+    fn aux_update_str_field(&mut self, tag: &[u8], value: &str) -> Result<()> {
+        let bytes = value.as_bytes();
+        if bytes.contains(&0) {
+            return Err(Error::AuxStringError);
+        }
+        let mut payload = Vec::with_capacity(bytes.len() + 1);
+        payload.extend_from_slice(bytes);
+        payload.push(0);
+        self.aux_update_field(tag, b'Z', &payload)
+    }
+
+    /// Pure Rust replacement for `htslib::bam_aux_update_array`.
+    ///
+    /// Writes a `B`-typed field. `sub_type` is the element type byte
+    /// (e.g. `b'i'`), `count` is the number of elements, and `data` is the
+    /// raw little-endian element bytes (`count * elem_size` bytes long).
+    fn aux_update_array_field(
+        &mut self,
+        tag: &[u8],
+        sub_type: u8,
+        count: u32,
+        data: &[u8],
+    ) -> Result<()> {
+        // B payload: sub_type (1) + count (4 LE) + element bytes
+        let mut payload = Vec::with_capacity(5 + data.len());
+        payload.push(sub_type);
+        payload.extend_from_slice(&count.to_le_bytes());
+        payload.extend_from_slice(data);
+        self.aux_update_field(tag, b'B', &payload)
+    }
+
     pub fn cigar_len(&self) -> usize {
         self.inner().core.n_cigar as usize
     }
@@ -816,119 +971,34 @@ impl Record {
                         c_str.as_ptr() as *mut u8,
                     )
                 }
-                // Not sure it's safe to cast an immutable slice to a mutable pointer in the following branches
-                Aux::ArrayI8(aux_array) => match aux_array {
-                    AuxArray::TargetType(inner) => htslib::bam_aux_update_array(
-                        self.inner_ptr_mut(),
-                        ctag,
-                        b'c',
-                        inner.len() as u32,
-                        inner.slice.as_ptr() as *mut ::libc::c_void,
-                    ),
-                    AuxArray::RawLeBytes(inner) => htslib::bam_aux_update_array(
-                        self.inner_ptr_mut(),
-                        ctag,
-                        b'c',
-                        inner.len() as u32,
-                        inner.slice.as_ptr() as *mut ::libc::c_void,
-                    ),
-                },
-                Aux::ArrayU8(aux_array) => match aux_array {
-                    AuxArray::TargetType(inner) => htslib::bam_aux_update_array(
-                        self.inner_ptr_mut(),
-                        ctag,
-                        b'C',
-                        inner.len() as u32,
-                        inner.slice.as_ptr() as *mut ::libc::c_void,
-                    ),
-                    AuxArray::RawLeBytes(inner) => htslib::bam_aux_update_array(
-                        self.inner_ptr_mut(),
-                        ctag,
-                        b'C',
-                        inner.len() as u32,
-                        inner.slice.as_ptr() as *mut ::libc::c_void,
-                    ),
-                },
-                Aux::ArrayI16(aux_array) => match aux_array {
-                    AuxArray::TargetType(inner) => htslib::bam_aux_update_array(
-                        self.inner_ptr_mut(),
-                        ctag,
-                        b's',
-                        inner.len() as u32,
-                        inner.slice.as_ptr() as *mut ::libc::c_void,
-                    ),
-                    AuxArray::RawLeBytes(inner) => htslib::bam_aux_update_array(
-                        self.inner_ptr_mut(),
-                        ctag,
-                        b's',
-                        inner.len() as u32,
-                        inner.slice.as_ptr() as *mut ::libc::c_void,
-                    ),
-                },
-                Aux::ArrayU16(aux_array) => match aux_array {
-                    AuxArray::TargetType(inner) => htslib::bam_aux_update_array(
-                        self.inner_ptr_mut(),
-                        ctag,
-                        b'S',
-                        inner.len() as u32,
-                        inner.slice.as_ptr() as *mut ::libc::c_void,
-                    ),
-                    AuxArray::RawLeBytes(inner) => htslib::bam_aux_update_array(
-                        self.inner_ptr_mut(),
-                        ctag,
-                        b'S',
-                        inner.len() as u32,
-                        inner.slice.as_ptr() as *mut ::libc::c_void,
-                    ),
-                },
-                Aux::ArrayI32(aux_array) => match aux_array {
-                    AuxArray::TargetType(inner) => htslib::bam_aux_update_array(
-                        self.inner_ptr_mut(),
-                        ctag,
-                        b'i',
-                        inner.len() as u32,
-                        inner.slice.as_ptr() as *mut ::libc::c_void,
-                    ),
-                    AuxArray::RawLeBytes(inner) => htslib::bam_aux_update_array(
-                        self.inner_ptr_mut(),
-                        ctag,
-                        b'i',
-                        inner.len() as u32,
-                        inner.slice.as_ptr() as *mut ::libc::c_void,
-                    ),
-                },
-                Aux::ArrayU32(aux_array) => match aux_array {
-                    AuxArray::TargetType(inner) => htslib::bam_aux_update_array(
-                        self.inner_ptr_mut(),
-                        ctag,
-                        b'I',
-                        inner.len() as u32,
-                        inner.slice.as_ptr() as *mut ::libc::c_void,
-                    ),
-                    AuxArray::RawLeBytes(inner) => htslib::bam_aux_update_array(
-                        self.inner_ptr_mut(),
-                        ctag,
-                        b'I',
-                        inner.len() as u32,
-                        inner.slice.as_ptr() as *mut ::libc::c_void,
-                    ),
-                },
-                Aux::ArrayFloat(aux_array) => match aux_array {
-                    AuxArray::TargetType(inner) => htslib::bam_aux_update_array(
-                        self.inner_ptr_mut(),
-                        ctag,
-                        b'f',
-                        inner.len() as u32,
-                        inner.slice.as_ptr() as *mut ::libc::c_void,
-                    ),
-                    AuxArray::RawLeBytes(inner) => htslib::bam_aux_update_array(
-                        self.inner_ptr_mut(),
-                        ctag,
-                        b'f',
-                        inner.len() as u32,
-                        inner.slice.as_ptr() as *mut ::libc::c_void,
-                    ),
-                },
+                Aux::ArrayI8(aux_array) => {
+                    let (count, data) = aux_array_as_bytes(&aux_array);
+                    return self.aux_update_array_field(tag, b'c', count, data);
+                }
+                Aux::ArrayU8(aux_array) => {
+                    let (count, data) = aux_array_as_bytes(&aux_array);
+                    return self.aux_update_array_field(tag, b'C', count, data);
+                }
+                Aux::ArrayI16(aux_array) => {
+                    let (count, data) = aux_array_as_bytes(&aux_array);
+                    return self.aux_update_array_field(tag, b's', count, data);
+                }
+                Aux::ArrayU16(aux_array) => {
+                    let (count, data) = aux_array_as_bytes(&aux_array);
+                    return self.aux_update_array_field(tag, b'S', count, data);
+                }
+                Aux::ArrayI32(aux_array) => {
+                    let (count, data) = aux_array_as_bytes(&aux_array);
+                    return self.aux_update_array_field(tag, b'i', count, data);
+                }
+                Aux::ArrayU32(aux_array) => {
+                    let (count, data) = aux_array_as_bytes(&aux_array);
+                    return self.aux_update_array_field(tag, b'I', count, data);
+                }
+                Aux::ArrayFloat(aux_array) => {
+                    let (count, data) = aux_array_as_bytes(&aux_array);
+                    return self.aux_update_array_field(tag, b'f', count, data);
+                }
             }
         };
 
@@ -944,153 +1014,47 @@ impl Record {
         // Update existing aux data for the given tag if already present in the record
         // without changing the ordering of tags in the record or append aux data at
         // the end of the existing aux records if it is a new tag.
-
-        let ctag = tag.as_ptr() as *mut c_char;
-        // SAFETY: self.inner_ptr_mut() is valid; ctag points to at least 2 bytes; value data is valid for the call.
-        let ret = unsafe {
-            match value {
-                Aux::Char(_v) => return Err(Error::AuxTagUpdatingNotSupported),
-                Aux::I8(v) => htslib::bam_aux_update_int(self.inner_ptr_mut(), ctag, v as i64),
-                Aux::U8(v) => htslib::bam_aux_update_int(self.inner_ptr_mut(), ctag, v as i64),
-                Aux::I16(v) => htslib::bam_aux_update_int(self.inner_ptr_mut(), ctag, v as i64),
-                Aux::U16(v) => htslib::bam_aux_update_int(self.inner_ptr_mut(), ctag, v as i64),
-                Aux::I32(v) => htslib::bam_aux_update_int(self.inner_ptr_mut(), ctag, v as i64),
-                Aux::U32(v) => htslib::bam_aux_update_int(self.inner_ptr_mut(), ctag, v as i64),
-                Aux::Float(v) => htslib::bam_aux_update_float(self.inner_ptr_mut(), ctag, v),
-                // Not part of specs but implemented in `htslib`:
-                Aux::Double(v) => {
-                    htslib::bam_aux_update_float(self.inner_ptr_mut(), ctag, v as f32)
-                }
-                Aux::String(v) => {
-                    let c_str = ffi::CString::new(v).map_err(|_| Error::AuxStringError)?;
-                    htslib::bam_aux_update_str(
-                        self.inner_ptr_mut(),
-                        ctag,
-                        (v.len() + 1) as i32,
-                        c_str.as_ptr() as *const c_char,
-                    )
-                }
-                Aux::HexByteArray(_v) => return Err(Error::AuxTagUpdatingNotSupported),
-                // Not sure it's safe to cast an immutable slice to a mutable pointer in the following branches
-                Aux::ArrayI8(aux_array) => match aux_array {
-                    AuxArray::TargetType(inner) => htslib::bam_aux_update_array(
-                        self.inner_ptr_mut(),
-                        ctag,
-                        b'c',
-                        inner.len() as u32,
-                        inner.slice.as_ptr() as *mut ::libc::c_void,
-                    ),
-                    AuxArray::RawLeBytes(inner) => htslib::bam_aux_update_array(
-                        self.inner_ptr_mut(),
-                        ctag,
-                        b'c',
-                        inner.len() as u32,
-                        inner.slice.as_ptr() as *mut ::libc::c_void,
-                    ),
-                },
-                Aux::ArrayU8(aux_array) => match aux_array {
-                    AuxArray::TargetType(inner) => htslib::bam_aux_update_array(
-                        self.inner_ptr_mut(),
-                        ctag,
-                        b'C',
-                        inner.len() as u32,
-                        inner.slice.as_ptr() as *mut ::libc::c_void,
-                    ),
-                    AuxArray::RawLeBytes(inner) => htslib::bam_aux_update_array(
-                        self.inner_ptr_mut(),
-                        ctag,
-                        b'C',
-                        inner.len() as u32,
-                        inner.slice.as_ptr() as *mut ::libc::c_void,
-                    ),
-                },
-                Aux::ArrayI16(aux_array) => match aux_array {
-                    AuxArray::TargetType(inner) => htslib::bam_aux_update_array(
-                        self.inner_ptr_mut(),
-                        ctag,
-                        b's',
-                        inner.len() as u32,
-                        inner.slice.as_ptr() as *mut ::libc::c_void,
-                    ),
-                    AuxArray::RawLeBytes(inner) => htslib::bam_aux_update_array(
-                        self.inner_ptr_mut(),
-                        ctag,
-                        b's',
-                        inner.len() as u32,
-                        inner.slice.as_ptr() as *mut ::libc::c_void,
-                    ),
-                },
-                Aux::ArrayU16(aux_array) => match aux_array {
-                    AuxArray::TargetType(inner) => htslib::bam_aux_update_array(
-                        self.inner_ptr_mut(),
-                        ctag,
-                        b'S',
-                        inner.len() as u32,
-                        inner.slice.as_ptr() as *mut ::libc::c_void,
-                    ),
-                    AuxArray::RawLeBytes(inner) => htslib::bam_aux_update_array(
-                        self.inner_ptr_mut(),
-                        ctag,
-                        b'S',
-                        inner.len() as u32,
-                        inner.slice.as_ptr() as *mut ::libc::c_void,
-                    ),
-                },
-                Aux::ArrayI32(aux_array) => match aux_array {
-                    AuxArray::TargetType(inner) => htslib::bam_aux_update_array(
-                        self.inner_ptr_mut(),
-                        ctag,
-                        b'i',
-                        inner.len() as u32,
-                        inner.slice.as_ptr() as *mut ::libc::c_void,
-                    ),
-                    AuxArray::RawLeBytes(inner) => htslib::bam_aux_update_array(
-                        self.inner_ptr_mut(),
-                        ctag,
-                        b'i',
-                        inner.len() as u32,
-                        inner.slice.as_ptr() as *mut ::libc::c_void,
-                    ),
-                },
-                Aux::ArrayU32(aux_array) => match aux_array {
-                    AuxArray::TargetType(inner) => htslib::bam_aux_update_array(
-                        self.inner_ptr_mut(),
-                        ctag,
-                        b'I',
-                        inner.len() as u32,
-                        inner.slice.as_ptr() as *mut ::libc::c_void,
-                    ),
-                    AuxArray::RawLeBytes(inner) => htslib::bam_aux_update_array(
-                        self.inner_ptr_mut(),
-                        ctag,
-                        b'I',
-                        inner.len() as u32,
-                        inner.slice.as_ptr() as *mut ::libc::c_void,
-                    ),
-                },
-                Aux::ArrayFloat(aux_array) => match aux_array {
-                    AuxArray::TargetType(inner) => htslib::bam_aux_update_array(
-                        self.inner_ptr_mut(),
-                        ctag,
-                        b'f',
-                        inner.len() as u32,
-                        inner.slice.as_ptr() as *mut ::libc::c_void,
-                    ),
-                    AuxArray::RawLeBytes(inner) => htslib::bam_aux_update_array(
-                        self.inner_ptr_mut(),
-                        ctag,
-                        b'f',
-                        inner.len() as u32,
-                        inner.slice.as_ptr() as *mut ::libc::c_void,
-                    ),
-                },
+        match value {
+            Aux::Char(_) => Err(Error::AuxTagUpdatingNotSupported),
+            Aux::I8(v) => self.aux_update_int(tag, v as i64),
+            Aux::U8(v) => self.aux_update_int(tag, v as i64),
+            Aux::I16(v) => self.aux_update_int(tag, v as i64),
+            Aux::U16(v) => self.aux_update_int(tag, v as i64),
+            Aux::I32(v) => self.aux_update_int(tag, v as i64),
+            Aux::U32(v) => self.aux_update_int(tag, v as i64),
+            Aux::Float(v) => self.aux_update_float(tag, v),
+            // Not part of specs but implemented in `htslib`:
+            Aux::Double(v) => self.aux_update_float(tag, v as f32),
+            Aux::String(v) => self.aux_update_str_field(tag, v),
+            Aux::HexByteArray(_) => Err(Error::AuxTagUpdatingNotSupported),
+            Aux::ArrayI8(aux_array) => {
+                let (count, data) = aux_array_as_bytes(&aux_array);
+                self.aux_update_array_field(tag, b'c', count, data)
             }
-        };
-
-        if ret < 0 {
-            Err(Error::Aux)
-        } else {
-            Ok(())
+            Aux::ArrayU8(aux_array) => {
+                let (count, data) = aux_array_as_bytes(&aux_array);
+                self.aux_update_array_field(tag, b'C', count, data)
+            }
+            Aux::ArrayI16(aux_array) => {
+                let (count, data) = aux_array_as_bytes(&aux_array);
+                self.aux_update_array_field(tag, b's', count, data)
+            }
+            Aux::ArrayU16(aux_array) => {
+                let (count, data) = aux_array_as_bytes(&aux_array);
+                self.aux_update_array_field(tag, b'S', count, data)
+            }
+            Aux::ArrayI32(aux_array) => {
+                let (count, data) = aux_array_as_bytes(&aux_array);
+                self.aux_update_array_field(tag, b'i', count, data)
+            }
+            Aux::ArrayU32(aux_array) => {
+                let (count, data) = aux_array_as_bytes(&aux_array);
+                self.aux_update_array_field(tag, b'I', count, data)
+            }
+            Aux::ArrayFloat(aux_array) => {
+                let (count, data) = aux_array_as_bytes(&aux_array);
+                self.aux_update_array_field(tag, b'f', count, data)
+            }
         }
     }
 
@@ -1632,6 +1596,28 @@ where
     }
 }
 
+/// Return `(element_count, raw_bytes)` for an `AuxArray`, regardless of variant.
+///
+/// For `TargetType` arrays the element slice is reinterpreted as bytes (safe
+/// because all `AuxArrayElement` types are plain-old-data with no padding).
+/// For `RawLeBytes` arrays the byte slice is returned directly.
+fn aux_array_as_bytes<'a, T: AuxArrayElement>(arr: &AuxArray<'a, T>) -> (u32, &'a [u8]) {
+    match arr {
+        AuxArray::TargetType(inner) => {
+            let count = inner.slice.len() as u32;
+            // SAFETY: T is a POD type (i8/u8/i16/u16/i32/u32/f32) with no padding.
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    inner.slice.as_ptr() as *const u8,
+                    std::mem::size_of_val(inner.slice),
+                )
+            };
+            (count, bytes)
+        }
+        AuxArray::RawLeBytes(inner) => (inner.len() as u32, inner.slice),
+    }
+}
+
 /// Compute the payload size in bytes for a BAM aux field given its type byte
 /// and the data starting after the type byte. Returns `None` on malformed data.
 fn aux_payload_size(type_byte: u8, data: &[u8]) -> Option<usize> {
@@ -2140,7 +2126,7 @@ impl Seq<'_> {
     ///
     /// # Safety
     ///
-    /// TODO
+    /// `i` must be less than `self.len()`; no bounds check is performed.
     #[inline]
     pub unsafe fn encoded_base_unchecked(&self, i: usize) -> u8 {
         encoded_base_unchecked(self.encoded, i)
@@ -2152,7 +2138,7 @@ impl Seq<'_> {
     ///
     /// # Safety
     ///
-    /// TODO
+    /// `i` must be less than `self.len()`; no bounds check is performed.
     #[inline]
     pub unsafe fn decoded_base_unchecked(&self, i: usize) -> u8 {
         *decode_base_unchecked(self.encoded_base_unchecked(i))
@@ -4629,6 +4615,188 @@ mod proptests {
         for i in 0..len / 2 {
             assert_eq!(r12[2 * i], r21[2 * i + 1]);
             assert_eq!(r12[2 * i + 1], r21[2 * i]);
+        }
+    }
+}
+
+// ---- Differential proptests for aux_update_* helpers (CL-37..40) ----
+//
+// Each proptest applies the C function (oracle) and the pure Rust helper to
+// two identical Records, then asserts that the resulting raw aux bytes are
+// identical. The tests cover both the "tag already present" (update) and
+// "tag absent" (append) code paths.
+#[cfg(test)]
+mod aux_update_proptest {
+    use super::*;
+    use proptest::prelude::*;
+    use std::os::raw::c_char;
+
+    fn make_record(seq: &[u8]) -> Record {
+        let mut rec = Record::new();
+        let cigar = CigarString::from(vec![Cigar::Match(seq.len() as u32)]);
+        let qual: Vec<u8> = vec![30u8; seq.len()];
+        rec.set(b"read1", Some(&cigar), seq, &qual);
+        rec
+    }
+
+    fn tag_strategy() -> impl Strategy<Value = [u8; 2]> {
+        let first = prop::sample::select((b'A'..=b'Z').chain(b'a'..=b'z').collect::<Vec<u8>>());
+        let second = prop::sample::select(
+            (b'A'..=b'Z')
+                .chain(b'a'..=b'z')
+                .chain(b'0'..=b'9')
+                .collect::<Vec<u8>>(),
+        );
+        (first, second).prop_map(|(a, b)| [a, b])
+    }
+
+    proptest! {
+        // CL-37: bam_aux_update_int — tag absent (append path)
+        #[test]
+        fn aux_update_int_matches_c_absent(
+            tag in tag_strategy(),
+            // Clamp to range C succeeds on: [-2^31, 0xFFFF_FFFF]
+            value in (-2_147_483_648_i64..=4_294_967_295_i64),
+        ) {
+            let mut rec_c = make_record(b"ACGT");
+            let mut rec_rs = make_record(b"ACGT");
+
+            let ctag = tag.as_ptr() as *mut c_char;
+            let c_ret = unsafe { htslib::bam_aux_update_int(rec_c.inner_ptr_mut(), ctag, value) };
+            let rs_ret = rec_rs.aux_update_int(&tag, value);
+
+            prop_assert_eq!(c_ret >= 0, rs_ret.is_ok(), "success mismatch for value {}", value);
+            if c_ret >= 0 {
+                prop_assert_eq!(
+                    rec_c.raw_aux_data(), rec_rs.raw_aux_data(),
+                    "raw aux mismatch (absent) for value {}", value
+                );
+            }
+        }
+
+        // CL-37: bam_aux_update_int — tag present (update/resize path)
+        #[test]
+        fn aux_update_int_matches_c_present(
+            tag in tag_strategy(),
+            initial in prop_oneof![
+                any::<i8>().prop_map(Aux::I8),
+                any::<i16>().prop_map(Aux::I16),
+                any::<i32>().prop_map(Aux::I32),
+                any::<u8>().prop_map(Aux::U8),
+                any::<u16>().prop_map(Aux::U16),
+                any::<u32>().prop_map(Aux::U32),
+            ],
+            value in (-2_147_483_648_i64..=4_294_967_295_i64),
+        ) {
+            let mut rec_c = make_record(b"ACGT");
+            rec_c.push_aux(&tag, initial).unwrap();
+            let mut rec_rs = rec_c.clone();
+
+            let ctag = tag.as_ptr() as *mut c_char;
+            let c_ret = unsafe { htslib::bam_aux_update_int(rec_c.inner_ptr_mut(), ctag, value) };
+            let rs_ret = rec_rs.aux_update_int(&tag, value);
+
+            prop_assert_eq!(c_ret >= 0, rs_ret.is_ok(), "success mismatch");
+            if c_ret >= 0 {
+                prop_assert_eq!(
+                    rec_c.raw_aux_data(), rec_rs.raw_aux_data(),
+                    "raw aux mismatch (present) for value {}", value
+                );
+            }
+        }
+
+        // CL-38: bam_aux_update_float
+        #[test]
+        fn aux_update_float_matches_c(
+            tag in tag_strategy(),
+            value in any::<f32>().prop_filter("finite", |f| f.is_finite()),
+            has_existing in any::<bool>(),
+        ) {
+            let mut rec_c = make_record(b"ACGT");
+            if has_existing {
+                rec_c.push_aux(&tag, Aux::Float(0.0)).unwrap();
+            }
+            let mut rec_rs = rec_c.clone();
+
+            let ctag = tag.as_ptr() as *mut c_char;
+            let c_ret = unsafe { htslib::bam_aux_update_float(rec_c.inner_ptr_mut(), ctag, value) };
+            let rs_ret = rec_rs.aux_update_float(&tag, value);
+
+            prop_assert_eq!(c_ret >= 0, rs_ret.is_ok());
+            if c_ret >= 0 {
+                prop_assert_eq!(rec_c.raw_aux_data(), rec_rs.raw_aux_data());
+            }
+        }
+
+        // CL-39: bam_aux_update_str
+        #[test]
+        fn aux_update_str_matches_c(
+            tag in tag_strategy(),
+            // ASCII printable strings — no NUL bytes
+            value in "[A-Za-z0-9 _\\-]{0,64}",
+            has_existing in any::<bool>(),
+        ) {
+            let mut rec_c = make_record(b"ACGT");
+            if has_existing {
+                rec_c.push_aux(&tag, Aux::String("placeholder")).unwrap();
+            }
+            let mut rec_rs = rec_c.clone();
+
+            let c_str = ffi::CString::new(value.as_bytes()).unwrap();
+            let ctag = tag.as_ptr() as *mut c_char;
+            let c_ret = unsafe {
+                htslib::bam_aux_update_str(
+                    rec_c.inner_ptr_mut(),
+                    ctag,
+                    (value.len() + 1) as i32,
+                    c_str.as_ptr() as *const c_char,
+                )
+            };
+            let rs_ret = rec_rs.aux_update_str_field(&tag, &value);
+
+            prop_assert_eq!(c_ret >= 0, rs_ret.is_ok());
+            if c_ret >= 0 {
+                prop_assert_eq!(rec_c.raw_aux_data(), rec_rs.raw_aux_data());
+            }
+        }
+
+        // CL-40: bam_aux_update_array (i32 sub-type)
+        #[test]
+        fn aux_update_array_matches_c(
+            tag in tag_strategy(),
+            data in proptest::collection::vec(any::<i32>(), 0..=16),
+            has_existing in any::<bool>(),
+        ) {
+            let mut rec_c = make_record(b"ACGT");
+            if has_existing {
+                let existing: Vec<i32> = vec![1, 2, 3];
+                rec_c
+                    .push_aux(&tag, Aux::ArrayI32((&existing as &[i32]).into()))
+                    .unwrap();
+            }
+            let mut rec_rs = rec_c.clone();
+
+            let count = data.len() as u32;
+            // Raw LE bytes of the i32 slice (valid on little-endian platforms).
+            let data_bytes: &[u8] = unsafe {
+                std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4)
+            };
+            let ctag = tag.as_ptr() as *mut c_char;
+            let c_ret = unsafe {
+                htslib::bam_aux_update_array(
+                    rec_c.inner_ptr_mut(),
+                    ctag,
+                    b'i',
+                    count,
+                    data.as_ptr() as *mut ::libc::c_void,
+                )
+            };
+            let rs_ret = rec_rs.aux_update_array_field(&tag, b'i', count, data_bytes);
+
+            prop_assert_eq!(c_ret >= 0, rs_ret.is_ok());
+            if c_ret >= 0 {
+                prop_assert_eq!(rec_c.raw_aux_data(), rec_rs.raw_aux_data());
+            }
         }
     }
 }

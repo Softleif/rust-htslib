@@ -63,20 +63,23 @@ Default: `bzip2`, `lzma`, `curl`. Optional: `s3`, `gcs`, `libdeflate`, `bindgen`
 
 ## FFI-to-Rust Replacement: Differential Proptest Strategy
 
+> **Law: Write the differential proptest BEFORE replacing the FFI call.**
+> The test must pass green against the C oracle first, then the FFI call is
+> replaced, and the test continues to pass — proving equivalence. Never skip
+> this step. Always compare against the C function.
+
 When replacing C (hts-sys) FFI calls with pure Rust implementations, use
 **differential property-based testing** to prove equivalence:
 
-1. **Write the Rust function as a stub** that initially delegates to the C FFI call
-   (with a `// TODO: replace with pure Rust` comment). This establishes the function
-   signature and call sites.
-2. **Write proptests that compare both implementations**: generate random inputs, call
-   both the C function (via FFI) and the Rust function, and assert identical results.
-   The C implementation is the oracle — the Rust function must match it exactly on all
-   generated inputs.
-3. **Replace the stub body** with the real pure Rust implementation.
-4. **Run the proptests** — they now verify the Rust code against C on hundreds of
-   random inputs, catching edge cases that hand-written tests would miss.
-5. Run the full test suite (`cargo test -- --test-threads 1`) to catch regressions.
+1. **Write the pure Rust helper** as a new private function alongside the
+   existing FFI call site. Do not touch the call site yet.
+2. **Write proptests that compare both implementations**: apply the C function
+   (via FFI) and the Rust function to identical records/inputs, then assert
+   identical results. The C implementation is the oracle.
+3. **Run the proptests** and confirm they pass green against C.
+4. **Replace the FFI call site** with the pure Rust helper.
+5. **Run the proptests again** — they now prove the replacement is correct.
+6. Run the full test suite (`cargo test -- --test-threads 1`) to catch regressions.
 
 ### Why this approach
 

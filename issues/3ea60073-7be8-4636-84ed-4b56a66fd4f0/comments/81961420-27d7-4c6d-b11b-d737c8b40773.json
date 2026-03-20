@@ -1,0 +1,8 @@
+{
+  "uuid": "81961420-27d7-4c6d-b11b-d737c8b40773",
+  "issue_uuid": "3ea60073-7be8-4636-84ed-4b56a66fd4f0",
+  "author": "anon-df5e95db",
+  "content": "Delivered: Refactored aux_tag_search to return Option<usize> (byte offset) instead of *const u8. All three callers updated to compute pointers at the exact unsafe callsite. Added memchr dependency for SIMD-accelerated NUL scanning in Z/H string fields. The function is now fully safe — no lifetime erasure.",
+  "created_at": "2026-03-20T10:26:14.044321Z",
+  "kind": "result"
+}

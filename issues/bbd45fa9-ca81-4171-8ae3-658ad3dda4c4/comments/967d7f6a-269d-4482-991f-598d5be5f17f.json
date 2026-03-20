@@ -1,0 +1,8 @@
+{
+  "uuid": "967d7f6a-269d-4482-991f-598d5be5f17f",
+  "issue_uuid": "bbd45fa9-ca81-4171-8ae3-658ad3dda4c4",
+  "author": "anon-df5e95db",
+  "content": "Plan: Add seq_names: Vec<String> and seq_lengths: HashMap<String, u64> fields to Reader. Populated at construction by calling C FFI (faidx_nseq, faidx_iseq, faidx_seq_len64) once. Then n_seqs(), seq_name(), fetch_seq_len() serve from cache — no more FFI calls for these three functions. Differential tests: compare C FFI results against cached values for real FASTA files.",
+  "created_at": "2026-03-20T11:46:19.705166Z",
+  "kind": "plan"
+}

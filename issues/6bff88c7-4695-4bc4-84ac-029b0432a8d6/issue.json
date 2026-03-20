@@ -2,11 +2,12 @@
   "uuid": "6bff88c7-4695-4bc4-84ac-029b0432a8d6",
   "display_id": 30,
   "title": "Replace SAM header accessors (sam_hdr_tid2name, sam_hdr_name2tid) with cached Rust lookups",
-  "status": "open",
+  "status": "closed",
   "priority": "medium",
   "created_by": "anon-df5e95db",
   "created_at": "2026-03-20T12:16:58.485875Z",
-  "updated_at": "2026-03-20T12:17:00.269213Z",
+  "updated_at": "2026-03-20T12:24:07.256760Z",
+  "closed_at": "2026-03-20T12:24:07.256760Z",
   "labels": [
     "enhancement"
   ]

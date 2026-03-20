@@ -1,0 +1,10 @@
+{
+  "uuid": "2bcce0fc-7b2b-4aa3-98ec-d9109cb839d2",
+  "display_id": 56,
+  "title": "Replace bcf_update_format_string with pure Rust string FORMAT encoder",
+  "status": "open",
+  "priority": "medium",
+  "created_by": "anon-df5e95db",
+  "created_at": "2026-03-20T13:17:58.682571Z",
+  "updated_at": "2026-03-20T13:17:58.682571Z"
+}

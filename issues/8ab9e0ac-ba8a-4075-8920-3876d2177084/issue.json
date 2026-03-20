@@ -1,0 +1,10 @@
+{
+  "uuid": "8ab9e0ac-ba8a-4075-8920-3876d2177084",
+  "display_id": 42,
+  "title": "Replace bcf_get_info_values with pure Rust header lookup + buffer fill",
+  "status": "open",
+  "priority": "high",
+  "created_by": "anon-df5e95db",
+  "created_at": "2026-03-20T13:14:24.263669Z",
+  "updated_at": "2026-03-20T13:14:24.263669Z"
+}

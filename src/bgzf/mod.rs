@@ -41,11 +41,46 @@ fn path_as_bytes<'a, P: 'a + AsRef<Path>>(path: P, must_exist: bool) -> Result<V
 /// Will return `Ok(true)` or `Ok(false)` if the file at `path` is BGZIP compressed. Will return an `Err` in
 /// cases where no testing is possible.
 pub fn is_bgzip<P: AsRef<Path>>(path: P) -> Result<bool, Error> {
-    let byte_path = path_as_bytes(path, true)?;
-    let cpath = ffi::CString::new(byte_path).unwrap();
-    // SAFETY: cpath is a valid null-terminated CString.
-    let is_bgzf = unsafe { htslib::bgzf_is_bgzf(cpath.as_ptr()) == 1 };
-    Ok(is_bgzf)
+    Ok(check_bgzf_header(path.as_ref()))
+}
+
+/// Check if a file starts with a valid BGZF header (16 bytes).
+///
+/// Matches the C `check_header` logic from bgzf.c:
+/// - Bytes 0–2: gzip magic (0x1f, 0x8b) + deflate method (0x08)
+/// - Byte 3: FEXTRA flag (bit 2) must be set
+/// - Bytes 10–11: XLEN == 6 (little-endian u16)
+/// - Bytes 12–13: subfield ID 'B','C'
+/// - Bytes 14–15: subfield length == 2 (little-endian u16)
+fn check_bgzf_header(path: &Path) -> bool {
+    use std::io::Read;
+    // NOTE: File::open and read errors are silently mapped to `false`, matching
+    // the C bgzf_is_bgzf behavior (returns 0 on any I/O failure). This means
+    // permission errors, broken symlinks, etc. are indistinguishable from
+    // "not a BGZF file". The caller (is_bgzip) already returns Result, but
+    // the error path only covers missing-file via path_as_bytes — not open/read
+    // failures. A future improvement could propagate I/O errors through Result.
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut buf = [0u8; 16];
+    if file.read(&mut buf).unwrap_or(0) != 16 {
+        return false;
+    }
+    // gzip magic + deflate
+    if buf[0] != 0x1f || buf[1] != 0x8b || buf[2] != 0x08 {
+        return false;
+    }
+    // FEXTRA flag
+    if buf[3] & 0x04 == 0 {
+        return false;
+    }
+    // XLEN == 6, subfield 'B','C', subfield length == 2
+    u16::from_le_bytes([buf[10], buf[11]]) == 6
+        && buf[12] == b'B'
+        && buf[13] == b'C'
+        && u16::from_le_bytes([buf[14], buf[15]]) == 2
 }
 
 /// A reader that transparently reads uncompressed, gzip, and bgzip files.
@@ -606,5 +641,128 @@ mod tests {
         );
 
         tmp.close().expect("Failed to delete temp dir");
+    }
+}
+
+#[cfg(test)]
+mod bgzf_is_bgzf_tests {
+    use super::*;
+    use proptest::prelude::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    /// Call C bgzf_is_bgzf as oracle.
+    fn is_bgzf_c(path: &Path) -> bool {
+        let byte_path = path_as_bytes(path, false).unwrap();
+        let cpath = ffi::CString::new(byte_path).unwrap();
+        unsafe { htslib::bgzf_is_bgzf(cpath.as_ptr()) == 1 }
+    }
+
+    /// Write bytes to a temp file and return the path.
+    fn write_temp(data: &[u8]) -> NamedTempFile {
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(data).unwrap();
+        f.flush().unwrap();
+        f
+    }
+
+    // Valid BGZF header: gz magic (1f 8b 08), flags with FEXTRA (04),
+    // mtime+xfl+os (6 bytes), XLEN=6, 'B','C', BSIZE=2
+    const VALID_BGZF_HEADER: [u8; 18] = [
+        0x1f, 0x8b, 0x08, 0x04, // gz magic + flags (FEXTRA)
+        0x00, 0x00, 0x00, 0x00, // mtime
+        0x00, 0xff, // xfl, OS
+        0x06, 0x00, // XLEN = 6
+        0x42, 0x43, // 'B', 'C'
+        0x02, 0x00, // subfield length = 2
+        0x00, 0x00, // BSIZE placeholder
+    ];
+
+    #[test]
+    fn real_bgzf_files_match_c() {
+        // Known BGZF files
+        for path in ["test/test.bam", "test/test_multi.bcf"] {
+            let p = Path::new(path);
+            if p.exists() {
+                let c = is_bgzf_c(p);
+                let rs = is_bgzip(p).unwrap();
+                assert_eq!(c, rs, "mismatch for {path}");
+                assert!(rs, "{} should be BGZF", path);
+            }
+        }
+    }
+
+    #[test]
+    fn plain_text_not_bgzf() {
+        let f = write_temp(b"This is plain text, not BGZF");
+        let c = is_bgzf_c(f.path());
+        let rs = is_bgzip(f.path()).unwrap();
+        assert_eq!(c, rs);
+        assert!(!rs);
+    }
+
+    #[test]
+    fn short_file_not_bgzf() {
+        let f = write_temp(&[0x1f, 0x8b]); // too short
+        let c = is_bgzf_c(f.path());
+        let rs = is_bgzip(f.path()).unwrap();
+        assert_eq!(c, rs);
+        assert!(!rs);
+    }
+
+    #[test]
+    fn empty_file_not_bgzf() {
+        let f = write_temp(&[]);
+        let c = is_bgzf_c(f.path());
+        let rs = is_bgzip(f.path()).unwrap();
+        assert_eq!(c, rs);
+        assert!(!rs);
+    }
+
+    #[test]
+    fn valid_bgzf_header_detected() {
+        let f = write_temp(&VALID_BGZF_HEADER);
+        let c = is_bgzf_c(f.path());
+        let rs = is_bgzip(f.path()).unwrap();
+        assert_eq!(c, rs);
+        assert!(rs);
+    }
+
+    #[test]
+    fn gzip_without_bgzf_extras_not_bgzf() {
+        // Valid gzip header but no FEXTRA flag
+        let header = [
+            0x1fu8, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0, 0xff, 0, 0, 0, 0, 0, 0,
+        ];
+        let f = write_temp(&header);
+        let c = is_bgzf_c(f.path());
+        let rs = is_bgzip(f.path()).unwrap();
+        assert_eq!(c, rs);
+        assert!(!rs);
+    }
+
+    proptest! {
+        /// Random 16+ byte buffers: Rust and C must agree on whether it's BGZF.
+        #[test]
+        fn random_bytes_match_c(data in proptest::collection::vec(any::<u8>(), 0..=64)) {
+            let f = write_temp(&data);
+            let c = is_bgzf_c(f.path());
+            let rs = is_bgzip(f.path()).unwrap();
+            prop_assert_eq!(c, rs, "mismatch on random data of len {}", data.len());
+        }
+
+        /// Mutate a single byte of a valid BGZF header: both impls must agree.
+        #[test]
+        fn mutated_bgzf_header_matches_c(
+            byte_idx in 0..18usize,
+            new_val in any::<u8>(),
+        ) {
+            let mut header = VALID_BGZF_HEADER;
+            header[byte_idx] = new_val;
+            let f = write_temp(&header);
+            let c = is_bgzf_c(f.path());
+            let rs = is_bgzip(f.path()).unwrap();
+            prop_assert_eq!(c, rs, "mismatch mutating byte {} to {}", byte_idx, new_val);
+        }
     }
 }

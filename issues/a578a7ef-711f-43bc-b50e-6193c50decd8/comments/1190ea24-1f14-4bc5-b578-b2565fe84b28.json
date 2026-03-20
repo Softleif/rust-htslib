@@ -1,0 +1,8 @@
+{
+  "uuid": "1190ea24-1f14-4bc5-b578-b2565fe84b28",
+  "issue_uuid": "a578a7ef-711f-43bc-b50e-6193c50decd8",
+  "author": "anon-df5e95db",
+  "content": "Unlocked by CL-6. 17-line C function: calls bcf_unpack, checks if filter already present, appends new filter ID to the filter array. Same pattern as bcf_update_filter.",
+  "created_at": "2026-03-20T13:15:21.781277Z",
+  "kind": "plan"
+}

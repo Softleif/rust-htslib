@@ -1,0 +1,8 @@
+{
+  "uuid": "59449e06-65f8-495e-97ab-0af6fcb658b4",
+  "issue_uuid": "69c78c0d-dac3-4ed2-9e7f-b0c8f178780c",
+  "author": "anon-df5e95db",
+  "content": "there is a bgzf crate that we might also be able to use. don't rewrite this just for fun.",
+  "created_at": "2026-03-20T12:16:23.800819Z",
+  "kind": "note"
+}

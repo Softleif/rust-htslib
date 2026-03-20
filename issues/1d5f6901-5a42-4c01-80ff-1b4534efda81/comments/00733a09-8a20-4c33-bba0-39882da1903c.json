@@ -1,0 +1,8 @@
+{
+  "uuid": "00733a09-8a20-4c33-bba0-39882da1903c",
+  "issue_uuid": "1d5f6901-5a42-4c01-80ff-1b4534efda81",
+  "author": "anon-df5e95db",
+  "content": "Delivered: Replaced all 4 bcf_hdr_id2int FFI call sites (name2rid, tag_type, name_to_id, sample_to_id) with pure Rust HashMap lookups. HeaderView now pre-builds three HashMap<Vec<u8>, i32> caches (one per BCF_DT_* dictionary) at construction time from the hdr->id[] arrays, giving O(1) lookups without touching the opaque C khash. 7 differential proptests (6 property-based + 1 real VCF file) verify equivalence with C oracle. All 224 tests pass, clippy clean.",
+  "created_at": "2026-03-20T11:02:46.679623Z",
+  "kind": "result"
+}

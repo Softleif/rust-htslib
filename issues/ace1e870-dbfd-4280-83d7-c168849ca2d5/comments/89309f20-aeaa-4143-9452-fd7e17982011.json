@@ -1,0 +1,8 @@
+{
+  "uuid": "89309f20-aeaa-4143-9452-fd7e17982011",
+  "issue_uuid": "ace1e870-dbfd-4280-83d7-c168849ca2d5",
+  "author": "anon-df5e95db",
+  "content": "Delivered: Replaced all 5 bcf_unpack FFI call sites (Record::new, Record::unpack, Record::alleles, Reader::read, IndexedReader::read) with pure Rust bcf_unpack_rs function. Implemented BCF binary decoding helpers (bcf_dec_size, bcf_dec_int1, bcf_dec_typed_int1) as safe Rust functions. Main function handles all 4 unpack phases: STR (ID+alleles), FLT (filters), INFO, FMT. Handles missing-value convention (count=0 → '.') matching C behavior exactly. 8 differential tests compare Rust output against C oracle including real BCF file data. All 217 tests + 38 doc tests pass, clippy clean.",
+  "created_at": "2026-03-20T10:18:06.082506Z",
+  "kind": "result"
+}

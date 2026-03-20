@@ -1,0 +1,10 @@
+{
+  "uuid": "b05274fb-1d3e-456a-bc75-ad0dd1c6a00b",
+  "display_id": 72,
+  "title": "Replace hts_itr_next with pure Rust record iteration",
+  "status": "open",
+  "priority": "low",
+  "created_by": "anon-df5e95db",
+  "created_at": "2026-03-20T14:37:52.394699Z",
+  "updated_at": "2026-03-20T14:37:52.394699Z"
+}

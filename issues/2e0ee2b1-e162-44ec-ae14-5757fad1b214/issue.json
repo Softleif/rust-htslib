@@ -2,11 +2,12 @@
   "uuid": "2e0ee2b1-e162-44ec-ae14-5757fad1b214",
   "display_id": 22,
   "title": "Fix bcf_dec_int1 zero-advance on unknown type causing infinite loop",
-  "status": "open",
+  "status": "closed",
   "priority": "high",
   "created_by": "anon-df5e95db",
   "created_at": "2026-03-20T10:23:16.698126Z",
-  "updated_at": "2026-03-20T10:51:36.218475Z",
+  "updated_at": "2026-03-20T10:53:57.701933Z",
+  "closed_at": "2026-03-20T10:53:57.701933Z",
   "labels": [
     "fix"
   ]

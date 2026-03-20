@@ -1,0 +1,8 @@
+{
+  "uuid": "5c138016-e747-48d8-a9eb-f212a490e41c",
+  "issue_uuid": "09ebe9d7-ec20-41a0-b4da-1390b1f8219c",
+  "author": "anon-df5e95db",
+  "content": "Plan: Replace hts_get_format FFI call with (*hts_file).format field access. Replace hts_get_bgzfp FFI call with (*hts_file).fp.bgzf field access. Both are trivial struct field reads — the htsFile struct is fully exposed in the Rust bindings. Write differential tests first comparing FFI vs direct access, then replace.",
+  "created_at": "2026-03-20T13:01:35.916864Z",
+  "kind": "plan"
+}

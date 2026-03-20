@@ -1,0 +1,8 @@
+{
+  "uuid": "b6dcda83-6e7a-4d8f-a3ef-86c653d28b8e",
+  "issue_uuid": "8ab9e0ac-ba8a-4075-8920-3876d2177084",
+  "author": "anon-df5e95db",
+  "content": "Unlocked by CL-26. The C function (7 lines for the wrapper, ~50 lines for bcf_get_info_int32 etc.) calls bcf_hdr_id2int then scans d.info for the matching key, copies data into a caller-provided buffer. With our HeaderView cache this becomes a dict_lookup + info array scan + typed copy. The buffer is already managed by the Rust Buffer struct.",
+  "created_at": "2026-03-20T13:14:27.859040Z",
+  "kind": "plan"
+}

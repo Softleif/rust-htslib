@@ -1,0 +1,10 @@
+{
+  "uuid": "d6553018-f9f1-4873-a453-e81a72bbdadd",
+  "display_id": 53,
+  "title": "Replace vcf_format with pure Rust BCF-to-VCF text formatter",
+  "status": "open",
+  "priority": "low",
+  "created_by": "anon-df5e95db",
+  "created_at": "2026-03-20T13:16:21.407223Z",
+  "updated_at": "2026-03-20T13:16:21.407223Z"
+}

@@ -1,0 +1,10 @@
+{
+  "uuid": "48ab4fc3-176e-4965-aaf3-abcb4cf21218",
+  "display_id": 67,
+  "title": "Replace sam_hdr_read and sam_hdr_write with pure Rust header I/O",
+  "status": "open",
+  "priority": "medium",
+  "created_by": "anon-df5e95db",
+  "created_at": "2026-03-20T14:36:54.430991Z",
+  "updated_at": "2026-03-20T14:36:54.430991Z"
+}

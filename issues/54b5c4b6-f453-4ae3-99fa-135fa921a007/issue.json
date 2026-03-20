@@ -7,5 +7,8 @@
   "priority": "high",
   "created_by": "driver--implement-issue-1-95f4",
   "created_at": "2026-03-20T08:37:36.770238Z",
-  "updated_at": "2026-03-20T08:37:36.770238Z"
+  "updated_at": "2026-03-20T08:37:38.424249Z",
+  "labels": [
+    "rust-replacement"
+  ]
 }

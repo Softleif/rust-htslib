@@ -1,0 +1,8 @@
+{
+  "uuid": "af9677a0-7c94-44b2-a4d9-5bb5566c8694",
+  "issue_uuid": "e3f584db-8ae0-4062-ab6e-030dbbf50638",
+  "author": "anon-df5e95db",
+  "content": "Created 20 tier-2 issues for newly unlocked FFI replacements. Dependency graph:\n\nTier 1 — No blockers (all leaf dependencies already replaced):\n  #37-40: bam_aux_update_int/float/str/array (depend on bam_aux_get ✅)\n  #41: bcf_get_fmt (depends on bcf_hdr_id2int ✅)\n  #42: bcf_get_info_values (depends on bcf_hdr_id2int ✅)\n  #43: bcf_get_format_values (depends on bcf_hdr_id2int ✅)\n  #44-49: bcf_update_id/add_id/filter/add_filter/remove_filter/alleles (depend on bcf_unpack ✅)\n  #50: bcf_update_info (depends on bcf_unpack ✅ + bcf_hdr_id2int ✅)\n  #51: bcf_update_format (depends on bcf_unpack ✅ + bcf_hdr_id2int ✅)\n  #52: bcf_translate (depends on bcf_unpack ✅ + bcf_hdr_id2int ✅)\n  #53: vcf_format (depends on bcf_unpack ✅)\n\nTier 2 — Blocked by tier 1:\n  #55: bcf_remove_allele_set → blocked by #50, #51\n  #56: bcf_update_format_string → blocked by #51\n\nTier 3 — Blocked by tier 2:\n  #54: bcf_trim_alleles → blocked by #41, #55",
+  "created_at": "2026-03-20T13:18:50.475906Z",
+  "kind": "result"
+}

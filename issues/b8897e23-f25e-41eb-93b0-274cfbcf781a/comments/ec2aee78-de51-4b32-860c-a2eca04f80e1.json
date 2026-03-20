@@ -1,0 +1,8 @@
+{
+  "uuid": "ec2aee78-de51-4b32-860c-a2eca04f80e1",
+  "issue_uuid": "b8897e23-f25e-41eb-93b0-274cfbcf781a",
+  "author": "anon-df5e95db",
+  "content": "sam_write1 (110 lines): format-dispatched — writes one record to BAM (binary), SAM (text), or CRAM. For BAM: serializes bam1_t fields as little-endian binary. For SAM: calls sam_format1 to produce text. Depends on: pure Rust BGZF (#65) for BAM output.",
+  "created_at": "2026-03-20T14:37:11.761482Z",
+  "kind": "plan"
+}

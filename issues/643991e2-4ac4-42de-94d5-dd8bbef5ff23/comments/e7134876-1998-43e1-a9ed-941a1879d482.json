@@ -1,0 +1,8 @@
+{
+  "uuid": "e7134876-1998-43e1-a9ed-941a1879d482",
+  "issue_uuid": "643991e2-4ac4-42de-94d5-dd8bbef5ff23",
+  "author": "anon-df5e95db",
+  "content": "Parses a SAM text line into a bam1_t record. 180 lines of C: splits tab-delimited fields, parses QNAME, FLAG, RNAME→tid, POS, MAPQ, CIGAR, RNEXT, PNEXT, TLEN, SEQ, QUAL, then aux tags. Complex but mechanical — all string parsing with known delimiters. Would make SAM text input FFI-free. Depends on HeaderView.tid() for RNAME→tid lookup (already Rust via cached HashMap). No other FFI dependencies for the parsing itself — the result is written into an existing bam1_t.",
+  "created_at": "2026-03-20T14:36:06.776023Z",
+  "kind": "plan"
+}

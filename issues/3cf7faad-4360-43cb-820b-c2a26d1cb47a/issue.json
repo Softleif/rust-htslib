@@ -3,11 +3,12 @@
   "display_id": 3,
   "title": "Replace kbs_init/kbs_insert/kbs_destroy with pure Rust BitSet",
   "description": "Replace the 3 kbitset FFI functions (kbs_init, kbs_insert, kbs_destroy) with a pure Rust implementation using either the bit_set crate or a simple Vec<u64> wrapper. These are trivial inline functions (~2 lines each) used only by bcf_trim_alleles/bcf_remove_allele_set in src/bcf/record.rs. Complexity: trivial. Unlocks: bcf_trim_alleles path.",
-  "status": "open",
+  "status": "closed",
   "priority": "high",
   "created_by": "driver--implement-issue-1-95f4",
   "created_at": "2026-03-20T08:37:22.240415Z",
-  "updated_at": "2026-03-20T08:37:23.949516Z",
+  "updated_at": "2026-03-20T11:40:40.942288Z",
+  "closed_at": "2026-03-20T11:40:40.942288Z",
   "labels": [
     "rust-replacement"
   ]

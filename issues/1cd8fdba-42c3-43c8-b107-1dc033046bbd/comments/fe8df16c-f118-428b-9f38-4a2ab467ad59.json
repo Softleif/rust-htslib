@@ -1,0 +1,8 @@
+{
+  "uuid": "fe8df16c-f118-428b-9f38-4a2ab467ad59",
+  "issue_uuid": "1cd8fdba-42c3-43c8-b107-1dc033046bbd",
+  "author": "anon-df5e95db",
+  "content": "Delivered: Replaced bgzf_is_bgzf with pure Rust check_bgzf_header — reads 16 bytes with std::fs::File and checks BGZF magic bytes. Zero FFI. Added comment about swallowed I/O errors matching C behavior. 8 differential tests (6 deterministic + 2 proptests including random bytes and single-byte mutations of valid header). All 247 tests pass, clippy clean.",
+  "created_at": "2026-03-20T12:29:38.221102Z",
+  "kind": "result"
+}

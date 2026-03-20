@@ -2,11 +2,12 @@
   "uuid": "1704fdd7-63d9-41b1-87f0-67d4ec34f15b",
   "display_id": 27,
   "title": "Replace kbs_init/kbs_insert/kbs_destroy with pure Rust BitVec",
-  "status": "open",
+  "status": "closed",
   "priority": "high",
   "created_by": "anon-df5e95db",
   "created_at": "2026-03-20T11:11:46.376746Z",
-  "updated_at": "2026-03-20T11:11:48.136555Z",
+  "updated_at": "2026-03-20T11:40:39.135003Z",
+  "closed_at": "2026-03-20T11:40:39.135003Z",
   "labels": [
     "enhancement"
   ]

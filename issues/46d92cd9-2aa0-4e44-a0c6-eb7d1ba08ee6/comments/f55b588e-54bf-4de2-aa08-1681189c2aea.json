@@ -1,0 +1,8 @@
+{
+  "uuid": "f55b588e-54bf-4de2-aa08-1681189c2aea",
+  "issue_uuid": "46d92cd9-2aa0-4e44-a0c6-eb7d1ba08ee6",
+  "author": "anon-df5e95db",
+  "content": "Delivered: Replaced bam_endpos with pure Rust CIGAR arithmetic in reference_end() (using existing cigar_op helpers). Replaced bam_aux_del with pure Rust byte shifting in remove_aux() (using extracted aux_payload_size helper). Also refactored aux_tag_search to use aux_payload_size, eliminating duplicated size-calculation logic. 2 differential tests for bam_endpos on real BAM/SAM files. All 236 tests pass, clippy clean.",
+  "created_at": "2026-03-20T12:12:53.994312Z",
+  "kind": "result"
+}

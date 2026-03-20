@@ -3,11 +3,12 @@
   "display_id": 13,
   "title": "Replace HTS core leaves (hts_get_bgzfp, hts_get_format, hts_itr_destroy, hts_idx_destroy, hts_set_fai_filename, hts_getline, cram_seek) with pure Rust",
   "description": "Replace 7 HTS core FFI leaf functions: hts_get_bgzfp (6 lines, accessor), hts_get_format (3 lines, accessor), hts_itr_destroy (13 lines, cleanup), hts_idx_destroy (26 lines, cleanup), hts_set_fai_filename (15 lines, string store), hts_getline (30 lines, line reader), cram_seek (7 lines, seek). All are leaves. Used across multiple modules. Complexity: trivial-easy.",
-  "status": "open",
+  "status": "closed",
   "priority": "low",
   "created_by": "driver--implement-issue-1-95f4",
   "created_at": "2026-03-20T08:38:03.728912Z",
-  "updated_at": "2026-03-20T08:38:05.459715Z",
+  "updated_at": "2026-03-20T13:05:45.332212Z",
+  "closed_at": "2026-03-20T13:05:45.332212Z",
   "labels": [
     "rust-replacement"
   ]

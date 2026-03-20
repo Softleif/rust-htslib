@@ -6,8 +6,11 @@
   "priority": "medium",
   "created_by": "anon-df5e95db",
   "created_at": "2026-03-20T14:36:47.469213Z",
-  "updated_at": "2026-03-20T14:36:50.597050Z",
+  "updated_at": "2026-03-20T14:39:37.682168Z",
   "labels": [
     "enhancement"
+  ],
+  "blockers": [
+    "03365057-d5ae-47d6-944c-decdff6c3fc0"
   ]
 }

@@ -1,0 +1,10 @@
+{
+  "uuid": "f75be2cd-f0d8-4969-9132-89c04efe0ac4",
+  "display_id": 44,
+  "title": "Replace bcf_update_id with pure Rust shared-block rewrite",
+  "status": "open",
+  "priority": "medium",
+  "created_by": "anon-df5e95db",
+  "created_at": "2026-03-20T13:15:01.881122Z",
+  "updated_at": "2026-03-20T13:15:01.881122Z"
+}

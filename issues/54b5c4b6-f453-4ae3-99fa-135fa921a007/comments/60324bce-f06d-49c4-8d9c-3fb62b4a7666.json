@@ -1,0 +1,8 @@
+{
+  "uuid": "60324bce-f06d-49c4-8d9c-3fb62b4a7666",
+  "issue_uuid": "54b5c4b6-f453-4ae3-99fa-135fa921a007",
+  "author": "anon-df5e95db",
+  "content": "Delivered: Replaced all 3 bam_aux_get FFI call sites (Record::aux, Record::remove_aux, RecordView::aux) with pure Rust aux_tag_search function. The function performs a linear scan through the BAM aux byte slice, matching the C implementation's semantics exactly. Added raw_aux_data() helper to Record. All 209 tests pass, clippy clean, 8 differential proptests confirm equivalence with C oracle.",
+  "created_at": "2026-03-20T09:14:43.698735Z",
+  "kind": "result"
+}

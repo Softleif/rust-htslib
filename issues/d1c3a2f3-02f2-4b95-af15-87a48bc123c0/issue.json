@@ -1,0 +1,11 @@
+{
+  "uuid": "d1c3a2f3-02f2-4b95-af15-87a48bc123c0",
+  "display_id": 18,
+  "title": "Replace sam_index_load/sam_index_load2 with pure Rust wrappers",
+  "description": "Replace 2 trivial SAM index loading FFI wrappers: sam_index_load (4 lines) and sam_index_load2 (3 lines). Both are leaves. Used in src/bam/mod.rs. Complexity: trivial.",
+  "status": "open",
+  "priority": "low",
+  "created_by": "driver--implement-issue-1-95f4",
+  "created_at": "2026-03-20T08:38:21.676594Z",
+  "updated_at": "2026-03-20T08:38:21.676594Z"
+}

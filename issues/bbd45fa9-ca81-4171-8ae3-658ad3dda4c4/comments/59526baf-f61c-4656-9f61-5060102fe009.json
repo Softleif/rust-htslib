@@ -1,0 +1,8 @@
+{
+  "uuid": "59526baf-f61c-4656-9f61-5060102fe009",
+  "issue_uuid": "bbd45fa9-ca81-4171-8ae3-658ad3dda4c4",
+  "author": "anon-df5e95db",
+  "content": "Delivered: Replaced faidx_nseq, faidx_iseq, faidx_seq_len64 with pure Rust cached lookups. Reader now pre-builds a Vec<String> of sequence names and a HashMap<String, u64> of sequence lengths at construction time (calling C FFI once). n_seqs(), seq_name(), fetch_seq_len() are now fully safe Rust with zero FFI calls. 5 differential tests verify equivalence with C oracle. All 234 tests pass, clippy clean.",
+  "created_at": "2026-03-20T11:48:18.583789Z",
+  "kind": "result"
+}

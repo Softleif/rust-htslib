@@ -1,0 +1,8 @@
+{
+  "uuid": "ce6b200b-ff83-48f2-b210-df51cda1d021",
+  "issue_uuid": "d9ad0f0a-912a-4e09-9aea-fb9b7bd89bc9",
+  "author": "anon-df5e95db",
+  "content": "Unlocked by CL-6. 80-line C function: calls bcf_unpack, rebuilds the shared binary block with new REF+ALT allele strings encoded as BCF_BT_CHAR typed arrays. Updates n_allele, d.allele pointers, and shared_dirty. Most complex of the simple update functions.",
+  "created_at": "2026-03-20T13:15:32.157949Z",
+  "kind": "plan"
+}

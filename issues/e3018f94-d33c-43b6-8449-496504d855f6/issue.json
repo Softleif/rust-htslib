@@ -1,0 +1,11 @@
+{
+  "uuid": "e3018f94-d33c-43b6-8449-496504d855f6",
+  "display_id": 17,
+  "title": "Replace synced BCF reader leaves (bcf_sr_set_opt, bcf_sr_remove_reader) with pure Rust",
+  "description": "Replace 2 synced BCF reader FFI leaf functions: bcf_sr_set_opt (35 lines, option setter) and bcf_sr_remove_reader (14 lines, array removal). Both are leaves. Used in src/bcf/mod.rs. Complexity: easy.",
+  "status": "open",
+  "priority": "low",
+  "created_by": "driver--implement-issue-1-95f4",
+  "created_at": "2026-03-20T08:38:17.994067Z",
+  "updated_at": "2026-03-20T08:38:17.994067Z"
+}

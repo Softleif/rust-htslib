@@ -38,62 +38,95 @@ lazy_static! {
 // Pure Rust BCF binary decoding helpers (replacement for htslib inline fns)
 // ---------------------------------------------------------------------------
 
-/// Maps BCF type codes to log2(element size in bytes).
-/// `bcf_type_shift[type]` gives the shift so `1 << shift` = element size.
-const BCF_TYPE_SHIFT: [u8; 8] = [
-    0, // BCF_BT_NULL  → 1 byte
-    0, // BCF_BT_INT8  → 1 byte
-    1, // BCF_BT_INT16 → 2 bytes
-    2, // BCF_BT_INT32 → 4 bytes
-    3, // BCF_BT_INT64 → 8 bytes  (unofficial)
-    2, // BCF_BT_FLOAT → 4 bytes
-    0, // (unused 6)
-    0, // BCF_BT_CHAR  → 1 byte
+/// Unofficial BCF type code for 64-bit integers (not exported by hts-sys).
+const BCF_BT_INT64: u32 = 4;
+
+/// Maps BCF type codes (0–15) to log2(element size in bytes).
+/// Matches the C `bcf_type_shift[16]` table. Unused/invalid codes map to 0.
+const BCF_TYPE_SHIFT: [u8; 16] = [
+    0, // 0  BCF_BT_NULL  → 1 byte
+    0, // 1  BCF_BT_INT8  → 1 byte
+    1, // 2  BCF_BT_INT16 → 2 bytes
+    2, // 3  BCF_BT_INT32 → 4 bytes
+    3, // 4  BCF_BT_INT64 → 8 bytes  (unofficial)
+    2, // 5  BCF_BT_FLOAT → 4 bytes
+    0, // 6  (unused)
+    0, // 7  BCF_BT_CHAR  → 1 byte
+    0, 0, 0, 0, 0, 0, 0, 0, // 8–15 unused
 ];
 
+/// Compute the byte length of `count` elements of BCF type `type_code`.
+#[inline]
+fn bcf_type_bytes(count: usize, type_code: u32) -> usize {
+    count << BCF_TYPE_SHIFT[type_code as usize] as usize
+}
+
+/// Find the length of a BCF_BT_CHAR field, stopping at the first NUL byte.
+/// Returns at most `max_len` (the declared element count).
+#[inline]
+fn char_field_len(data: &[u8], max_len: usize) -> usize {
+    memchr::memchr(0, &data[..max_len]).unwrap_or(max_len)
+}
+
 /// Decode one typed integer from a BCF byte stream.
-/// Returns `(value, bytes_consumed)`.
-fn bcf_dec_int1(data: &[u8], type_code: u32) -> (i64, usize) {
+///
+/// Returns `Some((value, bytes_consumed))` on success, or `None` if
+/// `type_code` is unrecognised or `data` is too short. Returning `None`
+/// prevents callers from advancing by zero bytes (infinite loop on corrupt data).
+fn bcf_dec_int1(data: &[u8], type_code: u32) -> Option<(i64, usize)> {
     match type_code {
-        htslib::BCF_BT_INT8 => (data[0] as i8 as i64, 1),
-        htslib::BCF_BT_INT16 => {
-            let v = i16::from_le_bytes([data[0], data[1]]);
-            (v as i64, 2)
+        htslib::BCF_BT_INT8 if !data.is_empty() => Some((data[0] as i8 as i64, 1)),
+        htslib::BCF_BT_INT16 if data.len() >= 2 => {
+            Some((i16::from_le_bytes([data[0], data[1]]) as i64, 2))
         }
-        htslib::BCF_BT_INT32 => {
-            let v = i32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-            (v as i64, 4)
-        }
-        4 /* BCF_BT_INT64 */ => {
-            let v = i64::from_le_bytes([
-                data[0], data[1], data[2], data[3],
-                data[4], data[5], data[6], data[7],
-            ]);
-            (v, 8)
-        }
-        _ => (0, 0),
+        htslib::BCF_BT_INT32 if data.len() >= 4 => Some((
+            i32::from_le_bytes([data[0], data[1], data[2], data[3]]) as i64,
+            4,
+        )),
+        BCF_BT_INT64 if data.len() >= 8 => Some((
+            i64::from_le_bytes([
+                data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+            ]),
+            8,
+        )),
+        _ => None,
     }
 }
 
-/// Decode a typed integer from a BCF byte stream where the first byte
-/// encodes the type. Returns `(value, bytes_consumed)` including the type byte.
-fn bcf_dec_typed_int1(data: &[u8]) -> (i64, usize) {
-    let type_code = (data[0] & 0xf) as u32;
-    let (val, consumed) = bcf_dec_int1(&data[1..], type_code);
-    (val, 1 + consumed)
+/// Decode a typed integer where the first byte encodes the type.
+/// Returns `Some((value, bytes_consumed))` including the type byte,
+/// or `None` on corrupt data.
+fn bcf_dec_typed_int1(data: &[u8]) -> Option<(i64, usize)> {
+    let type_code = (*data.first()? & 0xf) as u32;
+    let (val, consumed) = bcf_dec_int1(data.get(1..)?, type_code)?;
+    Some((val, 1 + consumed))
 }
 
 /// Decode the size+type header byte(s) of a BCF typed value.
-/// Returns `(count, type_code, bytes_consumed)`.
-fn bcf_dec_size(data: &[u8]) -> (usize, u32, usize) {
-    let type_code = (data[0] & 0xf) as u32;
-    let count_nibble = data[0] >> 4;
+/// Returns `Some((count, type_code, bytes_consumed))`, or `None` on corrupt data.
+fn bcf_dec_size(data: &[u8]) -> Option<(usize, u32, usize)> {
+    let first = *data.first()?;
+    let type_code = (first & 0xf) as u32;
+    let count_nibble = first >> 4;
     if count_nibble != 15 {
-        (count_nibble as usize, type_code, 1)
+        Some((count_nibble as usize, type_code, 1))
     } else {
-        let (val, consumed) = bcf_dec_typed_int1(&data[1..]);
-        (val as usize, type_code, 1 + consumed)
+        let (val, consumed) = bcf_dec_typed_int1(data.get(1..)?)?;
+        Some((val as usize, type_code, 1 + consumed))
     }
+}
+
+/// Grow a C-allocated buffer using `libc::realloc`. Aborts on allocation failure.
+///
+/// # Safety
+/// `ptr` must be null or point to memory previously allocated by `libc::malloc`/`realloc`.
+#[inline]
+unsafe fn crealloc<T>(ptr: *mut T, count: usize) -> *mut T {
+    let new = libc::realloc(ptr as *mut libc::c_void, count * std::mem::size_of::<T>());
+    if new.is_null() && count > 0 {
+        std::process::abort();
+    }
+    new as *mut T
 }
 
 /// Pure Rust replacement for `htslib::bcf_unpack`.
@@ -121,296 +154,323 @@ pub(crate) unsafe fn bcf_unpack_rs(b: *mut htslib::bcf1_t, which: i32) -> i32 {
     let shared = slice::from_raw_parts((*b).shared.s as *const u8, (*b).shared.l);
     let d = std::ptr::addr_of_mut!((*b).d);
 
-    // Phase 1: Unpack STR (ID + REF/ALT alleles)
-    if (which & htslib::BCF_UN_STR as i32 != 0) && ((*b).unpacked & htslib::BCF_UN_STR as i32 == 0)
+    // Dispatch to per-phase helpers. Each returns 0 on success, -1 on corrupt data.
+
+    if (which & htslib::BCF_UN_STR as i32 != 0)
+        && ((*b).unpacked & htslib::BCF_UN_STR as i32 == 0)
+        && unpack_str(shared, b, d) < 0
     {
-        let mut pos: usize = 0;
-
-        // --- ID ---
-        let id_start = pos;
-        let (count, type_code, hdr_size) = bcf_dec_size(&shared[pos..]);
-        pos += hdr_size;
-        let id_total_bytes = count << BCF_TYPE_SHIFT[type_code as usize & 7] as usize;
-
-        if count == 0 {
-            // Missing value: write "." (BCF convention from bcf_fmt_array)
-            let needed = 2; // '.' + NUL
-            if needed > (*d).m_id as usize {
-                (*d).m_id = needed as i32;
-                (*d).id = libc::realloc((*d).id as *mut libc::c_void, needed) as *mut c_char;
-            }
-            *((*d).id as *mut u8) = b'.';
-            *((*d).id as *mut u8).add(1) = 0;
-        } else {
-            let id_data_len = if type_code == htslib::BCF_BT_CHAR {
-                // Find actual string length (stop at NUL)
-                let mut len = 0;
-                while len < count && shared[pos + len] != 0 {
-                    len += 1;
-                }
-                len
-            } else {
-                id_total_bytes
-            };
-
-            // Grow (*d).id buffer if needed (need id_data_len + 1 for NUL)
-            let needed = id_data_len + 1;
-            if needed > (*d).m_id as usize {
-                (*d).m_id = needed as i32;
-                (*d).id = libc::realloc((*d).id as *mut libc::c_void, needed) as *mut c_char;
-            }
-            // Copy ID data and NUL-terminate
-            std::ptr::copy_nonoverlapping(shared[pos..].as_ptr(), (*d).id as *mut u8, id_data_len);
-            *((*d).id as *mut u8).add(id_data_len) = 0;
-        }
-        pos += id_total_bytes;
-        (*b).unpack_size[0] = (pos - id_start) as i32;
-
-        // --- REF + ALT alleles ---
-        let allele_start = pos;
-        let n_allele = (*b).n_allele() as usize;
-
-        // Grow (*d).allele pointer array if needed
-        if n_allele > (*d).m_allele as usize {
-            (*d).m_allele = n_allele as i32;
-            (*d).allele = libc::realloc(
-                (*d).allele as *mut libc::c_void,
-                n_allele * std::mem::size_of::<*mut c_char>(),
-            ) as *mut *mut c_char;
-        }
-
-        // Compute total bytes needed for all allele strings
-        // First pass: scan to determine total als buffer size
-        let mut scan_pos = pos;
-        let mut total_als_len: usize = 0;
-        for _ in 0..n_allele {
-            let (cnt, tc, hs) = bcf_dec_size(&shared[scan_pos..]);
-            scan_pos += hs;
-            let data_bytes = cnt << BCF_TYPE_SHIFT[tc as usize & 7] as usize;
-            let str_len = if cnt == 0 {
-                1 // "." for missing
-            } else if tc == htslib::BCF_BT_CHAR {
-                let mut len = 0;
-                while len < cnt && shared[scan_pos + len] != 0 {
-                    len += 1;
-                }
-                len
-            } else {
-                data_bytes
-            };
-            total_als_len += str_len + 1; // +1 for NUL separator
-            scan_pos += data_bytes;
-        }
-
-        if total_als_len > (*d).m_als as usize {
-            (*d).m_als = total_als_len as i32;
-            (*d).als = libc::realloc((*d).als as *mut libc::c_void, total_als_len) as *mut c_char;
-        }
-
-        // Second pass: copy allele strings into als buffer
-        let mut als_offset: usize = 0;
-        for i in 0..n_allele {
-            let (cnt, tc, hs) = bcf_dec_size(&shared[pos..]);
-            pos += hs;
-            let data_bytes = cnt << BCF_TYPE_SHIFT[tc as usize & 7] as usize;
-
-            *(*d).allele.add(i) = (*d).als.add(als_offset);
-
-            if cnt == 0 {
-                // Missing: write "."
-                *((*d).als as *mut u8).add(als_offset) = b'.';
-                als_offset += 1;
-            } else {
-                let str_len = if tc == htslib::BCF_BT_CHAR {
-                    let mut len = 0;
-                    while len < cnt && shared[pos + len] != 0 {
-                        len += 1;
-                    }
-                    len
-                } else {
-                    data_bytes
-                };
-                std::ptr::copy_nonoverlapping(
-                    shared[pos..].as_ptr(),
-                    ((*d).als as *mut u8).add(als_offset),
-                    str_len,
-                );
-                als_offset += str_len;
-            }
-            // NUL terminate
-            *((*d).als as *mut u8).add(als_offset) = 0;
-            als_offset += 1;
-            pos += data_bytes;
-        }
-        (*b).unpack_size[1] = (pos - allele_start) as i32;
-        (*b).unpacked |= htslib::BCF_UN_STR as i32;
+        return -1;
     }
 
-    // Phase 2: Unpack FLT (FILTER)
-    if (which & htslib::BCF_UN_FLT as i32 != 0) && ((*b).unpacked & htslib::BCF_UN_FLT as i32 == 0)
+    if (which & htslib::BCF_UN_FLT as i32 != 0)
+        && ((*b).unpacked & htslib::BCF_UN_FLT as i32 == 0)
+        && unpack_flt(shared, b, d) < 0
     {
-        let flt_start = ((*b).unpack_size[0] + (*b).unpack_size[1]) as usize;
-        let mut pos = flt_start;
-
-        if shared[pos] >> 4 != 0 {
-            let (count, type_code, hdr_size) = bcf_dec_size(&shared[pos..]);
-            pos += hdr_size;
-            (*d).n_flt = count as i32;
-
-            // Grow (*d).flt array if needed
-            if count > (*d).m_flt as usize {
-                (*d).m_flt = count as i32;
-                (*d).flt = libc::realloc(
-                    (*d).flt as *mut libc::c_void,
-                    count * std::mem::size_of::<i32>(),
-                ) as *mut i32;
-            }
-
-            for i in 0..count {
-                let (val, consumed) = bcf_dec_int1(&shared[pos..], type_code);
-                *(*d).flt.add(i) = val as i32;
-                pos += consumed;
-            }
-        } else {
-            pos += 1;
-            (*d).n_flt = 0;
-        }
-        (*b).unpack_size[2] = (pos - flt_start) as i32;
-        (*b).unpacked |= htslib::BCF_UN_FLT as i32;
+        return -1;
     }
 
-    // Phase 3: Unpack INFO
     if (which & htslib::BCF_UN_INFO as i32 != 0)
         && ((*b).unpacked & htslib::BCF_UN_INFO as i32 == 0)
+        && unpack_info(shared, b, d) < 0
     {
-        let info_start = ((*b).unpack_size[0] + (*b).unpack_size[1] + (*b).unpack_size[2]) as usize;
-        let mut pos = info_start;
-        let n_info = (*b).n_info() as usize;
-
-        // Grow (*d).info array if needed
-        if n_info > (*d).m_info as usize {
-            (*d).m_info = n_info as i32;
-            (*d).info = libc::realloc(
-                (*d).info as *mut libc::c_void,
-                n_info * std::mem::size_of::<htslib::bcf_info_t>(),
-            ) as *mut htslib::bcf_info_t;
-        }
-        // Clear vptr_free flags for all allocated slots
-        for i in 0..(*d).m_info as usize {
-            (*(*d).info.add(i)).set_vptr_free(0);
-        }
-
-        for i in 0..n_info {
-            let info = &mut *(*d).info.add(i);
-            let ptr_start = pos;
-
-            // Key (typed int)
-            let (key, consumed) = bcf_dec_typed_int1(&shared[pos..]);
-            info.key = key as i32;
-            pos += consumed;
-
-            // Value: size + type
-            let (len, type_code, hdr_size) = bcf_dec_size(&shared[pos..]);
-            info.len = len as i32;
-            info.type_ = type_code as i32;
-            pos += hdr_size;
-
-            info.vptr = shared.as_ptr().add(pos) as *mut u8;
-            info.set_vptr_off((pos - ptr_start) as u32);
-            info.set_vptr_free(0);
-            info.v1.i = 0;
-
-            let mut data_len = len;
-            if len == 1 {
-                match type_code {
-                    htslib::BCF_BT_INT8 | htslib::BCF_BT_CHAR => {
-                        info.v1.i = shared[pos] as i8 as i64;
-                    }
-                    htslib::BCF_BT_INT16 => {
-                        info.v1.i = i16::from_le_bytes([shared[pos], shared[pos + 1]]) as i64;
-                        data_len <<= 1;
-                    }
-                    htslib::BCF_BT_INT32 => {
-                        info.v1.i = i32::from_le_bytes([
-                            shared[pos], shared[pos + 1], shared[pos + 2], shared[pos + 3],
-                        ]) as i64;
-                        data_len <<= 2;
-                    }
-                    htslib::BCF_BT_FLOAT => {
-                        info.v1.f = f32::from_le_bytes([
-                            shared[pos], shared[pos + 1], shared[pos + 2], shared[pos + 3],
-                        ]);
-                        data_len <<= 2;
-                    }
-                    4 /* BCF_BT_INT64 */ => {
-                        info.v1.i = i64::from_le_bytes([
-                            shared[pos], shared[pos + 1], shared[pos + 2], shared[pos + 3],
-                            shared[pos + 4], shared[pos + 5], shared[pos + 6], shared[pos + 7],
-                        ]);
-                        data_len <<= 3;
-                    }
-                    _ => {}
-                }
-            } else {
-                data_len <<= BCF_TYPE_SHIFT[type_code as usize & 7] as usize;
-            }
-            pos += data_len;
-            info.vptr_len = (pos - ptr_start - info.vptr_off() as usize) as u32;
-        }
-        (*b).unpacked |= htslib::BCF_UN_INFO as i32;
+        return -1;
     }
 
-    // Phase 4: Unpack FMT (FORMAT + per-sample data)
     if (which & htslib::BCF_UN_FMT as i32 != 0)
         && (*b).n_sample() > 0
         && ((*b).unpacked & htslib::BCF_UN_FMT as i32 == 0)
+        && unpack_fmt(b, d) < 0
     {
-        let n_fmt = (*b).n_fmt() as usize;
-        let n_sample = (*b).n_sample() as usize;
-
-        // Grow (*d).fmt array if needed
-        if n_fmt > (*d).m_fmt as usize {
-            (*d).m_fmt = n_fmt as i32;
-            (*d).fmt = libc::realloc(
-                (*d).fmt as *mut libc::c_void,
-                n_fmt * std::mem::size_of::<htslib::bcf_fmt_t>(),
-            ) as *mut htslib::bcf_fmt_t;
-        }
-        // Clear p_free flags
-        for i in 0..(*d).m_fmt as usize {
-            (*(*d).fmt.add(i)).set_p_free(0);
-        }
-
-        let indiv = slice::from_raw_parts((*b).indiv.s as *const u8, (*b).indiv.l);
-        let mut pos: usize = 0;
-
-        for i in 0..n_fmt {
-            let fmt = &mut *(*d).fmt.add(i);
-            let ptr_start = pos;
-
-            // ID (typed int)
-            let (id, consumed) = bcf_dec_typed_int1(&indiv[pos..]);
-            fmt.id = id as i32;
-            pos += consumed;
-
-            // n values per sample + type
-            let (n, type_code, hdr_size) = bcf_dec_size(&indiv[pos..]);
-            fmt.n = n as i32;
-            fmt.type_ = type_code as i32;
-            fmt.size = (n << BCF_TYPE_SHIFT[type_code as usize & 7] as usize) as i32;
-            pos += hdr_size;
-
-            fmt.p = indiv.as_ptr().add(pos) as *mut u8;
-            fmt.set_p_off((pos - ptr_start) as u32);
-            fmt.set_p_free(0);
-
-            let data_len = n_sample * fmt.size as usize;
-            pos += data_len;
-            fmt.p_len = data_len as u32;
-        }
-        (*b).unpacked |= htslib::BCF_UN_FMT as i32;
+        return -1;
     }
 
+    0
+}
+
+/// Write a BCF_BT_CHAR field (or "." for count==0) into a C buffer.
+/// Returns the number of bytes written (excluding the NUL terminator, which is also written).
+///
+/// # Safety
+/// `dst` must have room for the string plus a NUL terminator.
+unsafe fn write_char_field(dst: *mut u8, src: &[u8], count: usize) -> usize {
+    if count == 0 {
+        *dst = b'.';
+        *dst.add(1) = 0;
+        1
+    } else {
+        let str_len = char_field_len(src, count);
+        std::ptr::copy_nonoverlapping(src.as_ptr(), dst, str_len);
+        *dst.add(str_len) = 0;
+        str_len
+    }
+}
+
+/// Phase 1: Unpack ID + REF/ALT alleles from the shared block.
+///
+/// # Safety
+/// `b` and `d` must be valid pointers to the record and its decoded-data struct.
+unsafe fn unpack_str(shared: &[u8], b: *mut htslib::bcf1_t, d: *mut htslib::bcf_dec_t) -> i32 {
+    let mut pos: usize = 0;
+
+    // --- ID ---
+    let id_start = pos;
+    let (count, type_code, hdr_size) = match bcf_dec_size(shared.get(pos..).unwrap_or(&[])) {
+        Some(v) => v,
+        None => return -1,
+    };
+    pos += hdr_size;
+    let id_total_bytes = bcf_type_bytes(count, type_code);
+
+    let id_display_len = if count == 0 {
+        1 // "."
+    } else if type_code == htslib::BCF_BT_CHAR {
+        char_field_len(&shared[pos..], count)
+    } else {
+        id_total_bytes
+    };
+
+    let needed = id_display_len + 1;
+    if needed > (*d).m_id as usize {
+        (*d).m_id = needed as i32;
+        (*d).id = crealloc((*d).id, needed);
+    }
+    let src_end = (pos + id_total_bytes).min(shared.len());
+    write_char_field((*d).id as *mut u8, &shared[pos..src_end], count);
+    pos += id_total_bytes;
+    (*b).unpack_size[0] = (pos - id_start) as i32;
+
+    // --- REF + ALT alleles ---
+    let allele_start = pos;
+    let n_allele = (*b).n_allele() as usize;
+
+    if n_allele > (*d).m_allele as usize {
+        (*d).m_allele = n_allele as i32;
+        (*d).allele = crealloc((*d).allele, n_allele);
+    }
+
+    // First pass: compute total als buffer size
+    let mut scan_pos = pos;
+    let mut total_als_len: usize = 0;
+    for _ in 0..n_allele {
+        let (cnt, tc, hs) = match bcf_dec_size(shared.get(scan_pos..).unwrap_or(&[])) {
+            Some(v) => v,
+            None => return -1,
+        };
+        scan_pos += hs;
+        let data_bytes = bcf_type_bytes(cnt, tc);
+        let str_len = if cnt == 0 {
+            1
+        } else if tc == htslib::BCF_BT_CHAR {
+            char_field_len(&shared[scan_pos..], cnt)
+        } else {
+            data_bytes
+        };
+        total_als_len += str_len + 1;
+        scan_pos += data_bytes;
+    }
+
+    if total_als_len > (*d).m_als as usize {
+        (*d).m_als = total_als_len as i32;
+        (*d).als = crealloc((*d).als, total_als_len);
+    }
+
+    // Second pass: copy allele strings
+    let mut als_offset: usize = 0;
+    for i in 0..n_allele {
+        let (cnt, tc, hs) = match bcf_dec_size(shared.get(pos..).unwrap_or(&[])) {
+            Some(v) => v,
+            None => return -1,
+        };
+        pos += hs;
+        let data_bytes = bcf_type_bytes(cnt, tc);
+
+        *(*d).allele.add(i) = (*d).als.add(als_offset);
+        let src_end = (pos + data_bytes).min(shared.len());
+        let written = write_char_field(
+            ((*d).als as *mut u8).add(als_offset),
+            &shared[pos..src_end],
+            cnt,
+        );
+        als_offset += written + 1; // written bytes + NUL
+        pos += data_bytes;
+    }
+    (*b).unpack_size[1] = (pos - allele_start) as i32;
+    (*b).unpacked |= htslib::BCF_UN_STR as i32;
+    0
+}
+
+/// Phase 2: Unpack FILTER field.
+///
+/// # Safety
+/// `b` and `d` must be valid pointers. `shared` must cover the full shared block.
+unsafe fn unpack_flt(shared: &[u8], b: *mut htslib::bcf1_t, d: *mut htslib::bcf_dec_t) -> i32 {
+    let flt_start = ((*b).unpack_size[0] + (*b).unpack_size[1]) as usize;
+    let mut pos = flt_start;
+
+    if pos >= shared.len() {
+        return -1;
+    }
+
+    if shared[pos] >> 4 != 0 {
+        let (count, type_code, hdr_size) = match bcf_dec_size(shared.get(pos..).unwrap_or(&[])) {
+            Some(v) => v,
+            None => return -1,
+        };
+        pos += hdr_size;
+        (*d).n_flt = count as i32;
+
+        if count > (*d).m_flt as usize {
+            (*d).m_flt = count as i32;
+            (*d).flt = crealloc((*d).flt, count);
+        }
+
+        for i in 0..count {
+            let (val, consumed) = match bcf_dec_int1(shared.get(pos..).unwrap_or(&[]), type_code) {
+                Some(v) => v,
+                None => return -1,
+            };
+            *(*d).flt.add(i) = val as i32;
+            pos += consumed;
+        }
+    } else {
+        pos += 1;
+        (*d).n_flt = 0;
+    }
+    (*b).unpack_size[2] = (pos - flt_start) as i32;
+    (*b).unpacked |= htslib::BCF_UN_FLT as i32;
+    0
+}
+
+/// Phase 3: Unpack INFO fields.
+///
+/// # Safety
+/// `b` and `d` must be valid pointers. `shared` must cover the full shared block.
+unsafe fn unpack_info(shared: &[u8], b: *mut htslib::bcf1_t, d: *mut htslib::bcf_dec_t) -> i32 {
+    let info_start = ((*b).unpack_size[0] + (*b).unpack_size[1] + (*b).unpack_size[2]) as usize;
+    let mut pos = info_start;
+    let n_info = (*b).n_info() as usize;
+
+    if n_info > (*d).m_info as usize {
+        (*d).m_info = n_info as i32;
+        (*d).info = crealloc((*d).info, n_info);
+    }
+    for i in 0..(*d).m_info as usize {
+        (*(*d).info.add(i)).set_vptr_free(0);
+    }
+
+    for i in 0..n_info {
+        let info = &mut *(*d).info.add(i);
+        let ptr_start = pos;
+
+        let (key, key_consumed) = match bcf_dec_typed_int1(shared.get(pos..).unwrap_or(&[])) {
+            Some(v) => v,
+            None => return -1,
+        };
+        info.key = key as i32;
+        pos += key_consumed;
+
+        let (len, type_code, hdr_size) = match bcf_dec_size(shared.get(pos..).unwrap_or(&[])) {
+            Some(v) => v,
+            None => return -1,
+        };
+        info.len = len as i32;
+        info.type_ = type_code as i32;
+        pos += hdr_size;
+
+        info.vptr = shared.as_ptr().add(pos) as *mut u8;
+        info.set_vptr_off((pos - ptr_start) as u32);
+        info.set_vptr_free(0);
+        info.v1.i = 0;
+
+        let data_len;
+        if len == 1 {
+            // Pre-extract scalar value into v1 union
+            match type_code {
+                htslib::BCF_BT_INT8 | htslib::BCF_BT_CHAR => {
+                    if pos < shared.len() {
+                        info.v1.i = shared[pos] as i8 as i64;
+                    }
+                    data_len = len;
+                }
+                htslib::BCF_BT_FLOAT => {
+                    if pos + 4 <= shared.len() {
+                        info.v1.f = f32::from_le_bytes([
+                            shared[pos],
+                            shared[pos + 1],
+                            shared[pos + 2],
+                            shared[pos + 3],
+                        ]);
+                    }
+                    data_len = bcf_type_bytes(len, type_code);
+                }
+                _ => {
+                    // INT16, INT32, INT64
+                    if let Some((v, _)) = bcf_dec_int1(shared.get(pos..).unwrap_or(&[]), type_code)
+                    {
+                        info.v1.i = v;
+                    }
+                    data_len = bcf_type_bytes(len, type_code);
+                }
+            }
+        } else {
+            data_len = bcf_type_bytes(len, type_code);
+        }
+        pos += data_len;
+        info.vptr_len = (pos - ptr_start - info.vptr_off() as usize) as u32;
+    }
+    (*b).unpacked |= htslib::BCF_UN_INFO as i32;
+    0
+}
+
+/// Phase 4: Unpack FORMAT + per-sample data from the indiv block.
+///
+/// # Safety
+/// `b` and `d` must be valid pointers.
+unsafe fn unpack_fmt(b: *mut htslib::bcf1_t, d: *mut htslib::bcf_dec_t) -> i32 {
+    let n_fmt = (*b).n_fmt() as usize;
+    let n_sample = (*b).n_sample() as usize;
+
+    if n_fmt > (*d).m_fmt as usize {
+        (*d).m_fmt = n_fmt as i32;
+        (*d).fmt = crealloc((*d).fmt, n_fmt);
+    }
+    for i in 0..(*d).m_fmt as usize {
+        (*(*d).fmt.add(i)).set_p_free(0);
+    }
+
+    let indiv = slice::from_raw_parts((*b).indiv.s as *const u8, (*b).indiv.l);
+    let mut pos: usize = 0;
+
+    for i in 0..n_fmt {
+        let fmt = &mut *(*d).fmt.add(i);
+        let ptr_start = pos;
+
+        let (id, consumed) = match bcf_dec_typed_int1(indiv.get(pos..).unwrap_or(&[])) {
+            Some(v) => v,
+            None => return -1,
+        };
+        fmt.id = id as i32;
+        pos += consumed;
+
+        let (n, type_code, hdr_size) = match bcf_dec_size(indiv.get(pos..).unwrap_or(&[])) {
+            Some(v) => v,
+            None => return -1,
+        };
+        fmt.n = n as i32;
+        fmt.type_ = type_code as i32;
+        fmt.size = bcf_type_bytes(n, type_code) as i32;
+        pos += hdr_size;
+
+        fmt.p = indiv.as_ptr().add(pos) as *mut u8;
+        fmt.set_p_off((pos - ptr_start) as u32);
+        fmt.set_p_free(0);
+
+        let data_len = n_sample * fmt.size as usize;
+        pos += data_len;
+        fmt.p_len = data_len as u32;
+    }
+    (*b).unpacked |= htslib::BCF_UN_FMT as i32;
     0
 }
 
@@ -2400,11 +2460,14 @@ mod bcf_unpack_tests {
         let mut c_info_keys = Vec::new();
         let mut c_info_types = Vec::new();
         let mut c_info_lens = Vec::new();
+        let mut c_info_v1 = Vec::new();
         for i in 0..n_info {
             let info = &*inner.d.info.add(i);
             c_info_keys.push(info.key);
             c_info_types.push(info.type_);
             c_info_lens.push(info.len);
+            // Capture scalar v1 value (i64 covers both int and float via bits)
+            c_info_v1.push(info.v1.i);
         }
 
         // Capture FORMAT state
@@ -2445,6 +2508,7 @@ mod bcf_unpack_tests {
             assert_eq!(c_info_keys[i], info.key, "INFO key mismatch at {i}");
             assert_eq!(c_info_types[i], info.type_, "INFO type mismatch at {i}");
             assert_eq!(c_info_lens[i], info.len, "INFO len mismatch at {i}");
+            assert_eq!(c_info_v1[i], info.v1.i, "INFO v1 scalar mismatch at {i}");
         }
 
         // Compare FORMAT

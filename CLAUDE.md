@@ -111,3 +111,13 @@ mod proptest_some_function {
 ```
 
 See `.claude/notes/ffi-tree.md` for the full FFI dependency tree and replacement plan.
+
+## Git Workflow
+
+The `git commit` hook requires an active crosslink work session, but `crosslink
+session work <id>` does not persist reliably between CLI invocations. **Do not
+attempt to run `git commit` directly** — the hook will always block. Instead:
+
+1. Stage files with `git add` (allowed by the hook).
+2. Ask the user to run the `git commit` command manually.
+3. After the commit, run `crosslink issue close <id>` to update the CHANGELOG.

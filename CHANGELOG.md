@@ -462,6 +462,8 @@ This project adheres to [Semantic Versioning](http://semver.org/).
 
 ## [0.19.1] - 2018-06-07
 ### Changed
+- Replace bcf_unpack with pure Rust binary BCF decoder (#6)
+- Replace bam_aux_get with pure Rust tag search (#7)
 - Moved unpacking of BCF records into constructor to prevent race conditions.
 - Fixed bug in retrieving BCF record id.
 - Fixed bug in the filter iterator of BCF.

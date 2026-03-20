@@ -1,0 +1,10 @@
+{
+  "uuid": "9b24ebd4-144e-4828-9d28-8acbbe92f64c",
+  "display_id": 71,
+  "title": "Replace sam_itr_queryi/querys with pure Rust region query",
+  "status": "open",
+  "priority": "low",
+  "created_by": "anon-df5e95db",
+  "created_at": "2026-03-20T14:37:46.555758Z",
+  "updated_at": "2026-03-20T14:37:46.555758Z"
+}

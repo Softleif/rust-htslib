@@ -1,0 +1,8 @@
+{
+  "uuid": "397e7ba7-cd92-4fb1-a4ee-5365d0dd8908",
+  "issue_uuid": "bbd45fa9-ca81-4171-8ae3-658ad3dda4c4",
+  "author": "anon-df5e95db",
+  "content": "Observation: faidx_t is opaque in Rust FFI (struct { _unused: [u8; 0] }). Cannot access internal fields. Will use construction-time caching: call C FFI once at Reader creation to build seq_names Vec and seq_lengths HashMap, then serve all lookups from Rust-owned data. Same pattern as HeaderView id_cache.",
+  "created_at": "2026-03-20T11:45:52.223073Z",
+  "kind": "observation"
+}

@@ -1594,6 +1594,9 @@ fn itr_next(
 #[derive(Debug)]
 pub struct HeaderView {
     inner: *mut htslib::bam_hdr_t,
+    /// Cached name→tid lookup for O(1) reverse mapping.
+    /// Keys are borrowed from the C header's target_name array at construction.
+    tid_by_name: std::collections::HashMap<Vec<u8>, u32>,
 }
 
 // SAFETY: HeaderView owns its bam_hdr_t pointer; header data is read-only after construction.
@@ -1634,7 +1637,30 @@ impl HeaderView {
 
     /// Create a new HeaderView from the underlying Htslib type, and own it.
     fn new(inner: *mut htslib::bam_hdr_t) -> Self {
-        HeaderView { inner }
+        let tid_by_name = unsafe { Self::build_tid_cache(inner) };
+        HeaderView { inner, tid_by_name }
+    }
+
+    /// Build the name→tid HashMap from the C header's target_name array.
+    ///
+    /// # Safety
+    /// `inner` must be a valid, non-null pointer to an initialized `bam_hdr_t`.
+    unsafe fn build_tid_cache(
+        inner: *const htslib::bam_hdr_t,
+    ) -> std::collections::HashMap<Vec<u8>, u32> {
+        let n = (*inner).n_targets as usize;
+        if n == 0 || (*inner).target_name.is_null() {
+            return std::collections::HashMap::new();
+        }
+        let names = slice::from_raw_parts((*inner).target_name, n);
+        let mut map = std::collections::HashMap::with_capacity(n);
+        for (tid, &name_ptr) in names.iter().enumerate() {
+            if !name_ptr.is_null() {
+                let name = ffi::CStr::from_ptr(name_ptr).to_bytes().to_vec();
+                map.insert(name, tid as u32);
+            }
+        }
+        map
     }
 
     #[inline]
@@ -1662,25 +1688,19 @@ impl HeaderView {
     }
 
     pub fn tid(&self, name: &[u8]) -> Option<u32> {
-        let c_str = ffi::CString::new(name).expect("Expected valid name.");
-        // SAFETY: self.inner is non-null (from constructor); c_str is a valid CString.
-        let tid = unsafe { htslib::sam_hdr_name2tid(self.inner, c_str.as_ptr()) };
-        if tid < 0 {
-            None
-        } else {
-            Some(tid as u32)
-        }
+        self.tid_by_name.get(name).copied()
     }
 
     pub fn tid2name(&self, tid: u32) -> Result<&[u8]> {
-        // sam_hdr_tid2name returns NULL for out-of-bounds tids.
-        // CStr::from_ptr on NULL is UB, so we must check first.
-        // SAFETY: self.inner is non-null (from constructor).
-        let ptr = unsafe { htslib::sam_hdr_tid2name(self.inner, tid as i32) };
+        let n = self.inner().n_targets as u32;
+        if tid >= n {
+            return Err(Error::InvalidTid { tid: tid as i32 });
+        }
+        // SAFETY: tid is bounds-checked; target_name array is valid with n_targets entries.
+        let ptr = unsafe { *self.inner().target_name.add(tid as usize) };
         if ptr.is_null() {
             return Err(Error::InvalidTid { tid: tid as i32 });
         }
-        // SAFETY: ptr is non-null (checked above); points to a NUL-terminated C string owned by the header.
         Ok(unsafe { ffi::CStr::from_ptr(ptr).to_bytes() })
     }
 
@@ -1729,10 +1749,9 @@ impl HeaderView {
 
 impl Clone for HeaderView {
     fn clone(&self) -> Self {
-        HeaderView {
-            // SAFETY: self.inner is non-null (from constructor); sam_hdr_dup deep-copies the header.
-            inner: unsafe { htslib::sam_hdr_dup(self.inner) },
-        }
+        // SAFETY: self.inner is non-null (from constructor); sam_hdr_dup deep-copies the header.
+        let inner = unsafe { htslib::sam_hdr_dup(self.inner) };
+        HeaderView::new(inner)
     }
 }
 
@@ -3456,5 +3475,48 @@ CCCCCCCCCCCCCCCCCCC"[..],
         let header = bam.header();
         assert!(header.tid2name(header.target_count()).is_err());
         assert!(header.tid2name(u32::MAX).is_err());
+    }
+
+    #[test]
+    fn tid_matches_c_for_all_targets() {
+        let bam = Reader::from_path("test/test.bam").expect("Error opening file.");
+        let header = bam.header();
+        for tid in 0..header.target_count() {
+            let name = header.tid2name(tid).unwrap();
+            // Compare Rust cache lookup against C FFI
+            let c_str = ffi::CString::new(name).unwrap();
+            let c_tid = unsafe { htslib::sam_hdr_name2tid(header.inner_ptr() as *mut _, c_str.as_ptr()) };
+            assert_eq!(
+                header.tid(name),
+                Some(c_tid as u32),
+                "tid mismatch for {:?}",
+                std::str::from_utf8(name)
+            );
+        }
+    }
+
+    #[test]
+    fn tid2name_matches_c_for_all_targets() {
+        let bam = Reader::from_path("test/test.bam").expect("Error opening file.");
+        let header = bam.header();
+        for tid in 0..header.target_count() {
+            let c_ptr = unsafe { htslib::sam_hdr_tid2name(header.inner_ptr() as *mut _, tid as i32) };
+            assert!(!c_ptr.is_null());
+            let c_name = unsafe { ffi::CStr::from_ptr(c_ptr).to_bytes() };
+            let rs_name = header.tid2name(tid).unwrap();
+            assert_eq!(c_name, rs_name, "tid2name mismatch at tid={tid}");
+        }
+    }
+
+    #[test]
+    fn tid_absent_name_returns_none() {
+        let bam = Reader::from_path("test/test.bam").expect("Error opening file.");
+        let header = bam.header();
+        assert_eq!(header.tid(b"nonexistent_chr"), None);
+        let c_tid = unsafe {
+            let c_str = ffi::CString::new("nonexistent_chr").unwrap();
+            htslib::sam_hdr_name2tid(header.inner_ptr() as *mut _, c_str.as_ptr())
+        };
+        assert_eq!(c_tid, -1);
     }
 }

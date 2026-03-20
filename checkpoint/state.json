@@ -2,23 +2,18 @@
   "next_display_id": 1,
   "next_comment_id": 1,
   "display_id_map": {},
-  "locks": {
-    "2": {
-      "agent_id": "driver--implement-issue-1-95f4",
-      "claimed_at": "2026-03-20T08:26:21.815219Z"
-    }
-  },
+  "locks": {},
   "issues": {},
   "unsigned_event_warnings": [
     {
       "agent_id": "driver--implement-issue-1-95f4",
-      "agent_seq": 1,
-      "timestamp": "2026-03-20T08:26:21.815219Z"
+      "agent_seq": 2,
+      "timestamp": "2026-03-20T08:43:19.657710Z"
     }
   ],
   "watermark": {
-    "timestamp": "2026-03-20T08:26:21.815219Z",
+    "timestamp": "2026-03-20T08:43:19.657710Z",
     "agent_id": "driver--implement-issue-1-95f4",
-    "agent_seq": 1
+    "agent_seq": 2
   }
 }

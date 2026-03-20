@@ -1,0 +1,8 @@
+{
+  "uuid": "86f22fb9-5e8c-4fa9-b5bc-74ea8771f374",
+  "issue_uuid": "fb893553-c854-4d89-954a-45102669d44c",
+  "author": "anon-df5e95db",
+  "content": "Plan: Write a pure Rust aux_tag_search() function that performs a linear scan through the BAM aux data byte slice to find a 2-byte tag. This replaces htslib::bam_aux_get which does the same thing in C. The function returns a pointer to the type byte (matching bam_aux_get's return convention) so parse_aux_field can be reused unchanged. Three call sites: Record::aux(), Record::remove_aux(), RecordView::aux(). Will add raw_aux_data() helper to Record (already exists on RecordView). Red-green approach: write failing tests first, then implement.",
+  "created_at": "2026-03-20T08:57:40.593538Z",
+  "kind": "plan"
+}

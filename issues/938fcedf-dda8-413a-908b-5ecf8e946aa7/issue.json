@@ -1,0 +1,11 @@
+{
+  "uuid": "938fcedf-dda8-413a-908b-5ecf8e946aa7",
+  "display_id": 14,
+  "title": "Replace tabix leaves (tbx_name2id, tbx_destroy, tbx_seqnames, tbx_readrec) with pure Rust",
+  "description": "Replace 4 tabix FFI leaf functions: tbx_name2id (4 lines, hash lookup), tbx_destroy (13 lines, cleanup), tbx_seqnames (28 lines, extract names from hash), tbx_readrec (21 lines, tab-separated record parsing). All are leaves. Used in src/tbx/mod.rs. Complexity: easy-medium.",
+  "status": "open",
+  "priority": "low",
+  "created_by": "driver--implement-issue-1-95f4",
+  "created_at": "2026-03-20T08:38:07.349567Z",
+  "updated_at": "2026-03-20T08:38:07.349567Z"
+}

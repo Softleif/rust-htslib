@@ -1,0 +1,8 @@
+{
+  "uuid": "5c67b597-51f1-4dc2-b52d-e84adf6b0023",
+  "issue_uuid": "4366ca68-3fd7-49ad-be80-4f87aeb406d6",
+  "author": "anon-df5e95db",
+  "content": "Instead of replacing tbx_readrec as a C callback, redesign tabix iteration to bypass hts_itr_query entirely. Use the bgzf crate for decompression and implement record parsing + index-based seeking in pure Rust. This would eliminate the tbx_readrec callback, hts_itr_query, hts_itr_next, and hts_get_bgzfp FFI calls in one sweep.\n\nApproach:\n1. Parse the .tbi index file directly (it's a standard binning index format)\n2. Use the bgzf crate to seek to the right virtual offset and read BGZF blocks\n3. Parse tab-separated records in Rust (trivial string splitting)\n4. Implement region overlap filtering in Rust\n\nThis is a larger architectural change than the incremental leaf replacements — it replaces the entire tabix read pipeline. Low priority since the current FFI approach works and this is mostly about code ownership.\n\nDependencies: none (bgzf crate handles compression). Would obsolete #14 (tabix leaves) and #16 (hts_itr_query).",
+  "created_at": "2026-03-20T13:22:30.943453Z",
+  "kind": "plan"
+}

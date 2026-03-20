@@ -1,0 +1,10 @@
+{
+  "uuid": "528e6daf-7620-424b-b143-4b3a6645fa2e",
+  "display_id": 74,
+  "title": "Replace sam_hdr_dup and sam_hdr_destroy with pure Rust header lifecycle",
+  "status": "open",
+  "priority": "low",
+  "created_by": "anon-df5e95db",
+  "created_at": "2026-03-20T14:38:39.495381Z",
+  "updated_at": "2026-03-20T14:38:39.495381Z"
+}

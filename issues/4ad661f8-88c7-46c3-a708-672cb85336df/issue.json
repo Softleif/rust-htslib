@@ -1,0 +1,11 @@
+{
+  "uuid": "4ad661f8-88c7-46c3-a708-672cb85336df",
+  "display_id": 11,
+  "title": "Replace BCF header leaves (bcf_hdr_add_sample, bcf_hdr_append, bcf_hdr_sync, bcf_hdr_destroy, bcf_hdr_get_version) with pure Rust",
+  "description": "Replace 5 BCF header FFI leaf functions: bcf_hdr_add_sample (8 lines), bcf_hdr_append (8 lines), bcf_hdr_sync (33 lines, rebuild hash), bcf_hdr_destroy (35 lines), bcf_hdr_get_version (9 lines). All are leaves. Used in src/bcf/header.rs. Complexity: easy.",
+  "status": "open",
+  "priority": "medium",
+  "created_by": "driver--implement-issue-1-95f4",
+  "created_at": "2026-03-20T08:37:56.087875Z",
+  "updated_at": "2026-03-20T08:37:56.087875Z"
+}

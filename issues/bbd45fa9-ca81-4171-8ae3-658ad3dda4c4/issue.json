@@ -1,0 +1,10 @@
+{
+  "uuid": "bbd45fa9-ca81-4171-8ae3-658ad3dda4c4",
+  "display_id": 28,
+  "title": "Replace faidx_nseq/faidx_iseq/faidx_seq_len64 with pure Rust",
+  "status": "open",
+  "priority": "high",
+  "created_by": "anon-df5e95db",
+  "created_at": "2026-03-20T11:41:23.164096Z",
+  "updated_at": "2026-03-20T11:41:23.164096Z"
+}

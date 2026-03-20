@@ -1,0 +1,8 @@
+{
+  "uuid": "656cb3d5-cc01-418a-983e-5ec3bb2af1ce",
+  "issue_uuid": "2bcce0fc-7b2b-4aa3-98ec-d9109cb839d2",
+  "author": "anon-df5e95db",
+  "content": "Unlocked after CL-51 (bcf_update_format). 25-line C wrapper that packs string values and delegates to bcf_update_format. Trivial once bcf_update_format is in Rust.",
+  "created_at": "2026-03-20T13:18:02.086089Z",
+  "kind": "plan"
+}

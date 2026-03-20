@@ -1,0 +1,8 @@
+{
+  "uuid": "f7a9a534-951a-4243-bdd6-b1e0846430a8",
+  "issue_uuid": "48ab4fc3-176e-4965-aaf3-abcb4cf21218",
+  "author": "anon-df5e95db",
+  "content": "sam_hdr_read (45 lines): reads the binary BAM header (magic, l_text, text, n_ref, ref entries) from a BGZF stream. sam_hdr_write (75 lines): writes the same. The BAM header binary format is simple and well-documented. Depends on pure Rust BGZF (#65) for the actual byte-level I/O.",
+  "created_at": "2026-03-20T14:36:57.932750Z",
+  "kind": "plan"
+}

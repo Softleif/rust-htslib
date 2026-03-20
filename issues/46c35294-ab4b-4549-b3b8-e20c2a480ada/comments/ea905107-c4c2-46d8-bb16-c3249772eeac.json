@@ -1,0 +1,8 @@
+{
+  "uuid": "ea905107-c4c2-46d8-bb16-c3249772eeac",
+  "issue_uuid": "46c35294-ab4b-4549-b3b8-e20c2a480ada",
+  "author": "driver--implement-issue-1-95f4",
+  "content": "Decision: Created 16 follow-up issues (#3-#18) for leaf function replacements. Organized by priority: high-priority leaves (#3-#7) are either trivial wins or high-value unlocks (bcf_unpack unlocks 10+ functions, bcf_hdr_id2int unlocks all data access, bam_aux_get unlocks all aux updates). Medium priority (#8-#11, #15) covers module-level leaf groups. Low priority (#12-#14, #16-#18) covers less impactful leaves.",
+  "created_at": "2026-03-20T08:38:53.489624Z",
+  "kind": "decision"
+}

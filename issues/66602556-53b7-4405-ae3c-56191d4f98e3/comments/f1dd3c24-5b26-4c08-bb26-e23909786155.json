@@ -1,0 +1,8 @@
+{
+  "uuid": "f1dd3c24-5b26-4c08-bb26-e23909786155",
+  "issue_uuid": "66602556-53b7-4405-ae3c-56191d4f98e3",
+  "author": "anon-df5e95db",
+  "content": "Unlocked by CL-6. 12-line C function: calls bcf_unpack, scans filter array for the target ID, removes it by shifting. If empty after removal and pass_on_empty is set, sets to PASS.",
+  "created_at": "2026-03-20T13:15:27.019601Z",
+  "kind": "plan"
+}

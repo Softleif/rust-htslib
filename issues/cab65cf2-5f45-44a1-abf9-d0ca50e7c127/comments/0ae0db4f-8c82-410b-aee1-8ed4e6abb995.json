@@ -1,0 +1,8 @@
+{
+  "uuid": "0ae0db4f-8c82-410b-aee1-8ed4e6abb995",
+  "issue_uuid": "cab65cf2-5f45-44a1-abf9-d0ca50e7c127",
+  "author": "anon-df5e95db",
+  "content": "Unlocked by CL-7. The C function (55 lines) finds the existing tag, computes the new array byte size (count * elem_size + 5 header bytes), resizes if different, and writes the sub-type byte + count + data. Same buffer management pattern as the other bam_aux_update_* functions.",
+  "created_at": "2026-03-20T13:14:01.850796Z",
+  "kind": "plan"
+}

@@ -666,6 +666,14 @@ impl Record {
             [..self.seq_len()]
     }
 
+    /// Get the raw auxiliary data as a byte slice.
+    fn raw_aux_data(&self) -> &[u8] {
+        &self.data()[self.qname_capacity()
+            + self.cigar_len() * std::mem::size_of::<u32>()
+            + self.seq_len().div_ceil(2)
+            + self.seq_len()..]
+    }
+
     /// Look up an auxiliary field by its tag.
     ///
     /// Only the first two bytes of a given tag are used for the look-up of a field.
@@ -674,13 +682,7 @@ impl Record {
         if tag.len() < 2 {
             return Err(Error::AuxStringError);
         }
-        // SAFETY: self.inner is a valid bam1_t; tag points to at least 2 bytes.
-        let aux = unsafe {
-            htslib::bam_aux_get(
-                &self.inner as *const htslib::bam1_t,
-                tag.as_ptr() as *const c_char,
-            )
-        };
+        let aux = aux_tag_search(self.raw_aux_data(), tag);
         // SAFETY: aux is either null (handled inside parse_aux_field) or points into record's aux data.
         unsafe { parse_aux_field(aux).map(|(aux_field, _length)| aux_field) }
     }
@@ -1092,21 +1094,14 @@ impl Record {
         if tag.len() < 2 {
             return Err(Error::AuxStringError);
         }
-        // SAFETY: self.inner is a valid bam1_t; tag points to at least 2 bytes.
-        let aux = unsafe {
-            htslib::bam_aux_get(
-                &self.inner as *const htslib::bam1_t,
-                tag.as_ptr() as *const c_char,
-            )
-        };
-        // SAFETY: aux is checked for null below; bam_aux_del modifies the record's aux data in place.
-        unsafe {
-            if aux.is_null() {
-                Err(Error::AuxTagNotFound)
-            } else {
-                htslib::bam_aux_del(self.inner_ptr_mut(), aux);
-                Ok(())
-            }
+        let aux = aux_tag_search(self.raw_aux_data(), tag);
+        if aux.is_null() {
+            Err(Error::AuxTagNotFound)
+        } else {
+            // SAFETY: aux points into this record's aux data (which is mutable via inner_ptr_mut);
+            // bam_aux_del modifies data in place. The cast is safe because we own the record mutably.
+            unsafe { htslib::bam_aux_del(self.inner_ptr_mut(), aux as *mut u8) };
+            Ok(())
         }
     }
 
@@ -1614,6 +1609,70 @@ where
         let array_length = self.array.len() - self.index;
         (array_length, Some(array_length))
     }
+}
+
+/// Pure Rust replacement for `htslib::bam_aux_get`.
+///
+/// Performs a linear scan through the packed BAM auxiliary data looking for a
+/// 2-byte tag. Returns a pointer to the type byte of the matching field (the
+/// same position that the C `bam_aux_get` returns), or null if the tag is not
+/// found.
+///
+/// The aux data format is a packed sequence of fields:
+///   `[tag0, tag1, type, payload...]`
+/// where payload length depends on the type byte.
+fn aux_tag_search(aux_data: &[u8], tag: &[u8]) -> *const u8 {
+    debug_assert!(tag.len() >= 2);
+    let tag0 = tag[0];
+    let tag1 = tag[1];
+    let mut pos = 0;
+    let len = aux_data.len();
+
+    while pos + 3 <= len {
+        // Check tag match
+        if aux_data[pos] == tag0 && aux_data[pos + 1] == tag1 {
+            return &aux_data[pos + 2] as *const u8;
+        }
+
+        // Skip this field: determine payload size from type byte
+        let type_byte = aux_data[pos + 2];
+        pos += 3; // advance past tag (2) + type (1)
+        match type_byte {
+            b'A' | b'c' | b'C' => pos += 1,
+            b's' | b'S' => pos += 2,
+            b'i' | b'I' | b'f' => pos += 4,
+            b'd' => pos += 8,
+            b'Z' | b'H' => {
+                // NUL-terminated string: scan for the terminator
+                while pos < len && aux_data[pos] != 0 {
+                    pos += 1;
+                }
+                pos += 1; // skip the NUL byte
+            }
+            b'B' => {
+                // Array: sub_type (1) + count (4 LE) + count * elem_size
+                if pos + 5 > len {
+                    return std::ptr::null();
+                }
+                let sub_type = aux_data[pos];
+                let count = u32::from_le_bytes([
+                    aux_data[pos + 1],
+                    aux_data[pos + 2],
+                    aux_data[pos + 3],
+                    aux_data[pos + 4],
+                ]) as usize;
+                let elem_size = match sub_type {
+                    b'c' | b'C' => 1,
+                    b's' | b'S' => 2,
+                    b'i' | b'I' | b'f' => 4,
+                    _ => return std::ptr::null(),
+                };
+                pos += 5 + count * elem_size;
+            }
+            _ => return std::ptr::null(),
+        }
+    }
+    std::ptr::null()
 }
 
 /// Parse a single aux field from a raw pointer to the type byte.
@@ -2307,13 +2366,8 @@ impl<'a> RecordView<'a> {
         if tag.len() < 2 {
             return Err(Error::AuxStringError);
         }
-        // SAFETY: self.inner is a valid bam1_t; tag points to at least 2 bytes.
-        let aux = unsafe {
-            htslib::bam_aux_get(
-                self.inner as *const htslib::bam1_t,
-                tag.as_ptr() as *const c_char,
-            )
-        };
+        let aux_data = self.raw_aux_data().unwrap_or(&[]);
+        let aux = aux_tag_search(aux_data, tag);
         // SAFETY: aux is either null (handled inside parse_aux_field) or points into record's aux data.
         unsafe { parse_aux_field(aux).map(|(aux_field, _length)| aux_field) }
     }

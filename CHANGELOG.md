@@ -303,6 +303,7 @@ This project adheres to [Semantic Versioning](http://semver.org/).
 
 ## [0.37.0] - 2021-07-05
 ### Added
+- Replace bam_aux_get FFI call with pure Rust tag search (#19)
 - implement issue #1 (#2)
 - `bcf::Record` methods `end`, `clear`, and `rlen` (@mbhall88).
 

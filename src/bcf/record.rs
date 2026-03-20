@@ -34,6 +34,386 @@ lazy_static! {
     static ref VECTOR_END_FLOAT: f32 = Ieee754::from_bits(0x7F80_0002);
 }
 
+// ---------------------------------------------------------------------------
+// Pure Rust BCF binary decoding helpers (replacement for htslib inline fns)
+// ---------------------------------------------------------------------------
+
+/// Maps BCF type codes to log2(element size in bytes).
+/// `bcf_type_shift[type]` gives the shift so `1 << shift` = element size.
+const BCF_TYPE_SHIFT: [u8; 8] = [
+    0, // BCF_BT_NULL  → 1 byte
+    0, // BCF_BT_INT8  → 1 byte
+    1, // BCF_BT_INT16 → 2 bytes
+    2, // BCF_BT_INT32 → 4 bytes
+    3, // BCF_BT_INT64 → 8 bytes  (unofficial)
+    2, // BCF_BT_FLOAT → 4 bytes
+    0, // (unused 6)
+    0, // BCF_BT_CHAR  → 1 byte
+];
+
+/// Decode one typed integer from a BCF byte stream.
+/// Returns `(value, bytes_consumed)`.
+fn bcf_dec_int1(data: &[u8], type_code: u32) -> (i64, usize) {
+    match type_code {
+        htslib::BCF_BT_INT8 => (data[0] as i8 as i64, 1),
+        htslib::BCF_BT_INT16 => {
+            let v = i16::from_le_bytes([data[0], data[1]]);
+            (v as i64, 2)
+        }
+        htslib::BCF_BT_INT32 => {
+            let v = i32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+            (v as i64, 4)
+        }
+        4 /* BCF_BT_INT64 */ => {
+            let v = i64::from_le_bytes([
+                data[0], data[1], data[2], data[3],
+                data[4], data[5], data[6], data[7],
+            ]);
+            (v, 8)
+        }
+        _ => (0, 0),
+    }
+}
+
+/// Decode a typed integer from a BCF byte stream where the first byte
+/// encodes the type. Returns `(value, bytes_consumed)` including the type byte.
+fn bcf_dec_typed_int1(data: &[u8]) -> (i64, usize) {
+    let type_code = (data[0] & 0xf) as u32;
+    let (val, consumed) = bcf_dec_int1(&data[1..], type_code);
+    (val, 1 + consumed)
+}
+
+/// Decode the size+type header byte(s) of a BCF typed value.
+/// Returns `(count, type_code, bytes_consumed)`.
+fn bcf_dec_size(data: &[u8]) -> (usize, u32, usize) {
+    let type_code = (data[0] & 0xf) as u32;
+    let count_nibble = data[0] >> 4;
+    if count_nibble != 15 {
+        (count_nibble as usize, type_code, 1)
+    } else {
+        let (val, consumed) = bcf_dec_typed_int1(&data[1..]);
+        (val as usize, type_code, 1 + consumed)
+    }
+}
+
+/// Pure Rust replacement for `htslib::bcf_unpack`.
+///
+/// Parses the binary BCF data in `b->shared` and `b->indiv` and populates
+/// the decoded fields in `b->d`. Uses `libc::realloc` for C-compatible
+/// memory management (the buffers will be freed by `bcf_destroy`).
+///
+/// # Safety
+/// `b` must be a valid, non-null pointer to a `bcf1_t` whose `shared` and
+/// `indiv` kstrings contain valid BCF binary data.
+pub(crate) unsafe fn bcf_unpack_rs(b: *mut htslib::bcf1_t, which: i32) -> i32 {
+    if (*b).shared.l == 0 {
+        return 0;
+    }
+
+    let mut which = which;
+    if which & htslib::BCF_UN_FLT as i32 != 0 {
+        which |= htslib::BCF_UN_STR as i32;
+    }
+    if which & htslib::BCF_UN_INFO as i32 != 0 {
+        which |= htslib::BCF_UN_SHR as i32;
+    }
+
+    let shared = slice::from_raw_parts((*b).shared.s as *const u8, (*b).shared.l);
+    let d = std::ptr::addr_of_mut!((*b).d);
+
+    // Phase 1: Unpack STR (ID + REF/ALT alleles)
+    if (which & htslib::BCF_UN_STR as i32 != 0) && ((*b).unpacked & htslib::BCF_UN_STR as i32 == 0)
+    {
+        let mut pos: usize = 0;
+
+        // --- ID ---
+        let id_start = pos;
+        let (count, type_code, hdr_size) = bcf_dec_size(&shared[pos..]);
+        pos += hdr_size;
+        let id_total_bytes = count << BCF_TYPE_SHIFT[type_code as usize & 7] as usize;
+
+        if count == 0 {
+            // Missing value: write "." (BCF convention from bcf_fmt_array)
+            let needed = 2; // '.' + NUL
+            if needed > (*d).m_id as usize {
+                (*d).m_id = needed as i32;
+                (*d).id = libc::realloc((*d).id as *mut libc::c_void, needed) as *mut c_char;
+            }
+            *((*d).id as *mut u8) = b'.';
+            *((*d).id as *mut u8).add(1) = 0;
+        } else {
+            let id_data_len = if type_code == htslib::BCF_BT_CHAR {
+                // Find actual string length (stop at NUL)
+                let mut len = 0;
+                while len < count && shared[pos + len] != 0 {
+                    len += 1;
+                }
+                len
+            } else {
+                id_total_bytes
+            };
+
+            // Grow (*d).id buffer if needed (need id_data_len + 1 for NUL)
+            let needed = id_data_len + 1;
+            if needed > (*d).m_id as usize {
+                (*d).m_id = needed as i32;
+                (*d).id = libc::realloc((*d).id as *mut libc::c_void, needed) as *mut c_char;
+            }
+            // Copy ID data and NUL-terminate
+            std::ptr::copy_nonoverlapping(shared[pos..].as_ptr(), (*d).id as *mut u8, id_data_len);
+            *((*d).id as *mut u8).add(id_data_len) = 0;
+        }
+        pos += id_total_bytes;
+        (*b).unpack_size[0] = (pos - id_start) as i32;
+
+        // --- REF + ALT alleles ---
+        let allele_start = pos;
+        let n_allele = (*b).n_allele() as usize;
+
+        // Grow (*d).allele pointer array if needed
+        if n_allele > (*d).m_allele as usize {
+            (*d).m_allele = n_allele as i32;
+            (*d).allele = libc::realloc(
+                (*d).allele as *mut libc::c_void,
+                n_allele * std::mem::size_of::<*mut c_char>(),
+            ) as *mut *mut c_char;
+        }
+
+        // Compute total bytes needed for all allele strings
+        // First pass: scan to determine total als buffer size
+        let mut scan_pos = pos;
+        let mut total_als_len: usize = 0;
+        for _ in 0..n_allele {
+            let (cnt, tc, hs) = bcf_dec_size(&shared[scan_pos..]);
+            scan_pos += hs;
+            let data_bytes = cnt << BCF_TYPE_SHIFT[tc as usize & 7] as usize;
+            let str_len = if cnt == 0 {
+                1 // "." for missing
+            } else if tc == htslib::BCF_BT_CHAR {
+                let mut len = 0;
+                while len < cnt && shared[scan_pos + len] != 0 {
+                    len += 1;
+                }
+                len
+            } else {
+                data_bytes
+            };
+            total_als_len += str_len + 1; // +1 for NUL separator
+            scan_pos += data_bytes;
+        }
+
+        if total_als_len > (*d).m_als as usize {
+            (*d).m_als = total_als_len as i32;
+            (*d).als = libc::realloc((*d).als as *mut libc::c_void, total_als_len) as *mut c_char;
+        }
+
+        // Second pass: copy allele strings into als buffer
+        let mut als_offset: usize = 0;
+        for i in 0..n_allele {
+            let (cnt, tc, hs) = bcf_dec_size(&shared[pos..]);
+            pos += hs;
+            let data_bytes = cnt << BCF_TYPE_SHIFT[tc as usize & 7] as usize;
+
+            *(*d).allele.add(i) = (*d).als.add(als_offset);
+
+            if cnt == 0 {
+                // Missing: write "."
+                *((*d).als as *mut u8).add(als_offset) = b'.';
+                als_offset += 1;
+            } else {
+                let str_len = if tc == htslib::BCF_BT_CHAR {
+                    let mut len = 0;
+                    while len < cnt && shared[pos + len] != 0 {
+                        len += 1;
+                    }
+                    len
+                } else {
+                    data_bytes
+                };
+                std::ptr::copy_nonoverlapping(
+                    shared[pos..].as_ptr(),
+                    ((*d).als as *mut u8).add(als_offset),
+                    str_len,
+                );
+                als_offset += str_len;
+            }
+            // NUL terminate
+            *((*d).als as *mut u8).add(als_offset) = 0;
+            als_offset += 1;
+            pos += data_bytes;
+        }
+        (*b).unpack_size[1] = (pos - allele_start) as i32;
+        (*b).unpacked |= htslib::BCF_UN_STR as i32;
+    }
+
+    // Phase 2: Unpack FLT (FILTER)
+    if (which & htslib::BCF_UN_FLT as i32 != 0) && ((*b).unpacked & htslib::BCF_UN_FLT as i32 == 0)
+    {
+        let flt_start = ((*b).unpack_size[0] + (*b).unpack_size[1]) as usize;
+        let mut pos = flt_start;
+
+        if shared[pos] >> 4 != 0 {
+            let (count, type_code, hdr_size) = bcf_dec_size(&shared[pos..]);
+            pos += hdr_size;
+            (*d).n_flt = count as i32;
+
+            // Grow (*d).flt array if needed
+            if count > (*d).m_flt as usize {
+                (*d).m_flt = count as i32;
+                (*d).flt = libc::realloc(
+                    (*d).flt as *mut libc::c_void,
+                    count * std::mem::size_of::<i32>(),
+                ) as *mut i32;
+            }
+
+            for i in 0..count {
+                let (val, consumed) = bcf_dec_int1(&shared[pos..], type_code);
+                *(*d).flt.add(i) = val as i32;
+                pos += consumed;
+            }
+        } else {
+            pos += 1;
+            (*d).n_flt = 0;
+        }
+        (*b).unpack_size[2] = (pos - flt_start) as i32;
+        (*b).unpacked |= htslib::BCF_UN_FLT as i32;
+    }
+
+    // Phase 3: Unpack INFO
+    if (which & htslib::BCF_UN_INFO as i32 != 0)
+        && ((*b).unpacked & htslib::BCF_UN_INFO as i32 == 0)
+    {
+        let info_start = ((*b).unpack_size[0] + (*b).unpack_size[1] + (*b).unpack_size[2]) as usize;
+        let mut pos = info_start;
+        let n_info = (*b).n_info() as usize;
+
+        // Grow (*d).info array if needed
+        if n_info > (*d).m_info as usize {
+            (*d).m_info = n_info as i32;
+            (*d).info = libc::realloc(
+                (*d).info as *mut libc::c_void,
+                n_info * std::mem::size_of::<htslib::bcf_info_t>(),
+            ) as *mut htslib::bcf_info_t;
+        }
+        // Clear vptr_free flags for all allocated slots
+        for i in 0..(*d).m_info as usize {
+            (*(*d).info.add(i)).set_vptr_free(0);
+        }
+
+        for i in 0..n_info {
+            let info = &mut *(*d).info.add(i);
+            let ptr_start = pos;
+
+            // Key (typed int)
+            let (key, consumed) = bcf_dec_typed_int1(&shared[pos..]);
+            info.key = key as i32;
+            pos += consumed;
+
+            // Value: size + type
+            let (len, type_code, hdr_size) = bcf_dec_size(&shared[pos..]);
+            info.len = len as i32;
+            info.type_ = type_code as i32;
+            pos += hdr_size;
+
+            info.vptr = shared.as_ptr().add(pos) as *mut u8;
+            info.set_vptr_off((pos - ptr_start) as u32);
+            info.set_vptr_free(0);
+            info.v1.i = 0;
+
+            let mut data_len = len;
+            if len == 1 {
+                match type_code {
+                    htslib::BCF_BT_INT8 | htslib::BCF_BT_CHAR => {
+                        info.v1.i = shared[pos] as i8 as i64;
+                    }
+                    htslib::BCF_BT_INT16 => {
+                        info.v1.i = i16::from_le_bytes([shared[pos], shared[pos + 1]]) as i64;
+                        data_len <<= 1;
+                    }
+                    htslib::BCF_BT_INT32 => {
+                        info.v1.i = i32::from_le_bytes([
+                            shared[pos], shared[pos + 1], shared[pos + 2], shared[pos + 3],
+                        ]) as i64;
+                        data_len <<= 2;
+                    }
+                    htslib::BCF_BT_FLOAT => {
+                        info.v1.f = f32::from_le_bytes([
+                            shared[pos], shared[pos + 1], shared[pos + 2], shared[pos + 3],
+                        ]);
+                        data_len <<= 2;
+                    }
+                    4 /* BCF_BT_INT64 */ => {
+                        info.v1.i = i64::from_le_bytes([
+                            shared[pos], shared[pos + 1], shared[pos + 2], shared[pos + 3],
+                            shared[pos + 4], shared[pos + 5], shared[pos + 6], shared[pos + 7],
+                        ]);
+                        data_len <<= 3;
+                    }
+                    _ => {}
+                }
+            } else {
+                data_len <<= BCF_TYPE_SHIFT[type_code as usize & 7] as usize;
+            }
+            pos += data_len;
+            info.vptr_len = (pos - ptr_start - info.vptr_off() as usize) as u32;
+        }
+        (*b).unpacked |= htslib::BCF_UN_INFO as i32;
+    }
+
+    // Phase 4: Unpack FMT (FORMAT + per-sample data)
+    if (which & htslib::BCF_UN_FMT as i32 != 0)
+        && (*b).n_sample() > 0
+        && ((*b).unpacked & htslib::BCF_UN_FMT as i32 == 0)
+    {
+        let n_fmt = (*b).n_fmt() as usize;
+        let n_sample = (*b).n_sample() as usize;
+
+        // Grow (*d).fmt array if needed
+        if n_fmt > (*d).m_fmt as usize {
+            (*d).m_fmt = n_fmt as i32;
+            (*d).fmt = libc::realloc(
+                (*d).fmt as *mut libc::c_void,
+                n_fmt * std::mem::size_of::<htslib::bcf_fmt_t>(),
+            ) as *mut htslib::bcf_fmt_t;
+        }
+        // Clear p_free flags
+        for i in 0..(*d).m_fmt as usize {
+            (*(*d).fmt.add(i)).set_p_free(0);
+        }
+
+        let indiv = slice::from_raw_parts((*b).indiv.s as *const u8, (*b).indiv.l);
+        let mut pos: usize = 0;
+
+        for i in 0..n_fmt {
+            let fmt = &mut *(*d).fmt.add(i);
+            let ptr_start = pos;
+
+            // ID (typed int)
+            let (id, consumed) = bcf_dec_typed_int1(&indiv[pos..]);
+            fmt.id = id as i32;
+            pos += consumed;
+
+            // n values per sample + type
+            let (n, type_code, hdr_size) = bcf_dec_size(&indiv[pos..]);
+            fmt.n = n as i32;
+            fmt.type_ = type_code as i32;
+            fmt.size = (n << BCF_TYPE_SHIFT[type_code as usize & 7] as usize) as i32;
+            pos += hdr_size;
+
+            fmt.p = indiv.as_ptr().add(pos) as *mut u8;
+            fmt.set_p_off((pos - ptr_start) as u32);
+            fmt.set_p_free(0);
+
+            let data_len = n_sample * fmt.size as usize;
+            pos += data_len;
+            fmt.p_len = data_len as u32;
+        }
+        (*b).unpacked |= htslib::BCF_UN_FMT as i32;
+    }
+
+    0
+}
+
 /// Common methods for numeric INFO and FORMAT entries
 pub trait Numeric {
     /// Return true if entry is a missing value
@@ -200,7 +580,7 @@ impl Record {
         let inner = unsafe {
             let inner = htslib::bcf_init();
             // Always unpack record.
-            htslib::bcf_unpack(inner, htslib::BCF_UN_ALL as i32);
+            bcf_unpack_rs(inner, htslib::BCF_UN_ALL as i32);
             inner
         };
         Record { inner, header }
@@ -209,7 +589,7 @@ impl Record {
     /// Force unpacking of internal record values.
     pub fn unpack(&mut self) {
         // SAFETY: self.inner is non-null (from constructor).
-        unsafe { htslib::bcf_unpack(self.inner, htslib::BCF_UN_ALL as i32) };
+        unsafe { bcf_unpack_rs(self.inner, htslib::BCF_UN_ALL as i32) };
     }
 
     /// Return associated header.
@@ -606,7 +986,7 @@ impl Record {
     /// The first allele is the reference allele.
     pub fn alleles(&self) -> Vec<&[u8]> {
         // SAFETY: self.inner is non-null (from constructor).
-        unsafe { htslib::bcf_unpack(self.inner, htslib::BCF_UN_ALL as i32) };
+        unsafe { bcf_unpack_rs(self.inner, htslib::BCF_UN_ALL as i32) };
         let n = self.inner().n_allele() as usize;
         let dec = self.inner().d;
         // SAFETY: dec.allele points to n valid C string pointers after bcf_unpack.
@@ -1972,5 +2352,213 @@ mod tests {
             record.to_vcf_string().unwrap(),
             "chr1\t1\t.\t.\t.\t0\tfoo\t.\n"
         );
+    }
+}
+
+#[cfg(test)]
+mod bcf_unpack_tests {
+    use super::*;
+    use crate::bcf::{Format, Header, Writer};
+    use tempfile::NamedTempFile;
+
+    /// Helper: create a BCF writer with a rich header (contigs, filters, INFO, FORMAT, samples).
+    fn make_writer_and_header() -> (NamedTempFile, Writer) {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path();
+        let mut header = Header::new();
+        header.push_record(b"##contig=<ID=chr1,length=10000>");
+        header.push_record(b"##contig=<ID=chr2,length=20000>");
+        header.push_record(br#"##FILTER=<ID=q10,Description="Quality below 10">"#);
+        header.push_record(br#"##FILTER=<ID=s50,Description="SNP cluster">"#);
+        header.push_record(br#"##INFO=<ID=DP,Number=1,Type=Integer,Description="Depth">"#);
+        header.push_record(br#"##INFO=<ID=AF,Number=A,Type=Float,Description="AF">"#);
+        header.push_record(br#"##INFO=<ID=DB,Number=0,Type=Flag,Description="dbSNP membership">"#);
+        header.push_record(br#"##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">"#);
+        header.push_record(br#"##FORMAT=<ID=GQ,Number=1,Type=Integer,Description="GQ">"#);
+        header.push_sample(b"sample1");
+        let writer = Writer::from_path(path, &header, true, Format::Bcf).unwrap();
+        (tmp, writer)
+    }
+
+    /// Compare the decoded state produced by C bcf_unpack vs Rust bcf_unpack_rs.
+    ///
+    /// Strategy:
+    /// 1. Record was already unpacked by C (via writer.empty_record() + set_* methods)
+    /// 2. Read out the C-decoded values as the oracle
+    /// 3. Reset the unpacked flag to 0
+    /// 4. Call bcf_unpack_rs
+    /// 5. Read out decoded values again and compare
+    unsafe fn assert_unpack_equivalence(rec: &mut Record) {
+        // Step 1: Record is already C-unpacked. Read oracle values.
+        let c_id = rec.id();
+        let c_alleles: Vec<Vec<u8>> = rec.alleles().iter().map(|a| a.to_vec()).collect();
+        let c_filters: Vec<u32> = rec.filters().map(|f| f.0).collect();
+
+        // Also capture INFO state
+        let inner = &*rec.inner;
+        let n_info = inner.n_info() as usize;
+        let mut c_info_keys = Vec::new();
+        let mut c_info_types = Vec::new();
+        let mut c_info_lens = Vec::new();
+        for i in 0..n_info {
+            let info = &*inner.d.info.add(i);
+            c_info_keys.push(info.key);
+            c_info_types.push(info.type_);
+            c_info_lens.push(info.len);
+        }
+
+        // Capture FORMAT state
+        let n_fmt = inner.n_fmt() as usize;
+        let mut c_fmt_ids = Vec::new();
+        let mut c_fmt_ns = Vec::new();
+        let mut c_fmt_types = Vec::new();
+        let mut c_fmt_sizes = Vec::new();
+        for i in 0..n_fmt {
+            let fmt = &*inner.d.fmt.add(i);
+            c_fmt_ids.push(fmt.id);
+            c_fmt_ns.push(fmt.n);
+            c_fmt_types.push(fmt.type_);
+            c_fmt_sizes.push(fmt.size);
+        }
+
+        // Step 2: Reset unpacked flag and unpack_size to force re-unpacking
+        (*rec.inner).unpacked = 0;
+        (*rec.inner).unpack_size = [0; 3];
+
+        // Step 3: Call Rust implementation
+        bcf_unpack_rs(rec.inner, htslib::BCF_UN_ALL as i32);
+
+        // Step 4: Compare decoded values
+        let rs_id = rec.id();
+        assert_eq!(c_id, rs_id, "ID mismatch");
+
+        let rs_alleles: Vec<Vec<u8>> = rec.alleles().iter().map(|a| a.to_vec()).collect();
+        assert_eq!(c_alleles, rs_alleles, "Alleles mismatch");
+
+        let rs_filters: Vec<u32> = rec.filters().map(|f| f.0).collect();
+        assert_eq!(c_filters, rs_filters, "Filters mismatch");
+
+        // Compare INFO
+        let inner = &*rec.inner;
+        for i in 0..n_info {
+            let info = &*inner.d.info.add(i);
+            assert_eq!(c_info_keys[i], info.key, "INFO key mismatch at {i}");
+            assert_eq!(c_info_types[i], info.type_, "INFO type mismatch at {i}");
+            assert_eq!(c_info_lens[i], info.len, "INFO len mismatch at {i}");
+        }
+
+        // Compare FORMAT
+        for i in 0..n_fmt {
+            let fmt = &*inner.d.fmt.add(i);
+            assert_eq!(c_fmt_ids[i], fmt.id, "FMT id mismatch at {i}");
+            assert_eq!(c_fmt_ns[i], fmt.n, "FMT n mismatch at {i}");
+            assert_eq!(c_fmt_types[i], fmt.type_, "FMT type mismatch at {i}");
+            assert_eq!(c_fmt_sizes[i], fmt.size, "FMT size mismatch at {i}");
+        }
+    }
+
+    #[test]
+    fn test_unpack_minimal_record() {
+        let (_tmp, writer) = make_writer_and_header();
+        let mut record = writer.empty_record();
+        record.set_rid(Some(0));
+        record.set_pos(100);
+        record.set_alleles(&[b"A", b"T"]).unwrap();
+        unsafe { assert_unpack_equivalence(&mut record) };
+    }
+
+    #[test]
+    fn test_unpack_with_id() {
+        let (_tmp, writer) = make_writer_and_header();
+        let mut record = writer.empty_record();
+        record.set_rid(Some(0));
+        record.set_pos(42);
+        record.set_id(b"rs12345").unwrap();
+        record.set_alleles(&[b"C", b"G"]).unwrap();
+        unsafe { assert_unpack_equivalence(&mut record) };
+    }
+
+    #[test]
+    fn test_unpack_with_filters() {
+        let (_tmp, writer) = make_writer_and_header();
+        let mut record = writer.empty_record();
+        record.set_rid(Some(0));
+        record.set_pos(200);
+        record.set_alleles(&[b"A", b"T"]).unwrap();
+        record.push_filter("q10".as_bytes()).unwrap();
+        record.push_filter("s50".as_bytes()).unwrap();
+        unsafe { assert_unpack_equivalence(&mut record) };
+    }
+
+    #[test]
+    fn test_unpack_multiallelic() {
+        let (_tmp, writer) = make_writer_and_header();
+        let mut record = writer.empty_record();
+        record.set_rid(Some(1));
+        record.set_pos(500);
+        record
+            .set_alleles(&[b"ACGT", b"A", b"AC", b"ACGTACGT"])
+            .unwrap();
+        unsafe { assert_unpack_equivalence(&mut record) };
+    }
+
+    #[test]
+    fn test_unpack_with_info_fields() {
+        let (_tmp, writer) = make_writer_and_header();
+        let mut record = writer.empty_record();
+        record.set_rid(Some(0));
+        record.set_pos(300);
+        record.set_alleles(&[b"G", b"A"]).unwrap();
+        record.push_info_integer(cstr8!("DP"), &[42]).unwrap();
+        record.push_info_float(cstr8!("AF"), &[0.5]).unwrap();
+        record.push_info_flag(cstr8!("DB")).unwrap();
+        unsafe { assert_unpack_equivalence(&mut record) };
+    }
+
+    #[test]
+    fn test_unpack_with_format_fields() {
+        let (_tmp, writer) = make_writer_and_header();
+        let mut record = writer.empty_record();
+        record.set_rid(Some(0));
+        record.set_pos(400);
+        record.set_alleles(&[b"T", b"C"]).unwrap();
+        record
+            .push_genotypes(&[GenotypeAllele::Unphased(0), GenotypeAllele::Unphased(1)])
+            .unwrap();
+        record.push_format_integer(cstr8!("GQ"), &[30]).unwrap();
+        unsafe { assert_unpack_equivalence(&mut record) };
+    }
+
+    #[test]
+    fn test_unpack_kitchen_sink() {
+        let (_tmp, writer) = make_writer_and_header();
+        let mut record = writer.empty_record();
+        record.set_rid(Some(1));
+        record.set_pos(999);
+        record.set_id(b"rs99999").unwrap();
+        record.set_alleles(&[b"AAAA", b"T", b"GGGG"]).unwrap();
+        record.set_qual(99.9);
+        record.push_filter("q10".as_bytes()).unwrap();
+        record.push_info_integer(cstr8!("DP"), &[1000]).unwrap();
+        record.push_info_float(cstr8!("AF"), &[0.25]).unwrap();
+        record.push_info_flag(cstr8!("DB")).unwrap();
+        record
+            .push_genotypes(&[GenotypeAllele::Unphased(1), GenotypeAllele::Phased(2)])
+            .unwrap();
+        record.push_format_integer(cstr8!("GQ"), &[99]).unwrap();
+        unsafe { assert_unpack_equivalence(&mut record) };
+    }
+
+    #[test]
+    fn test_unpack_from_file() {
+        // Test with real BCF data read from disk
+        use crate::bcf::Read;
+        let mut reader =
+            crate::bcf::Reader::from_path("test/test_multi.bcf").expect("Error opening file.");
+        let mut record = reader.empty_record();
+        while let Some(Ok(())) = reader.read(&mut record) {
+            // Record was unpacked by C via read(). Now test Rust re-unpack.
+            unsafe { assert_unpack_equivalence(&mut record) };
+        }
     }
 }

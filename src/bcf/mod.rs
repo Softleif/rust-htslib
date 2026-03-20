@@ -272,7 +272,7 @@ impl Read for Reader {
                 // SAFETY: record.inner is valid after a successful bcf_read.
                 unsafe {
                     // Always unpack record.
-                    htslib::bcf_unpack(record.inner_mut(), htslib::BCF_UN_ALL as i32);
+                    record::bcf_unpack_rs(record.inner_mut(), htslib::BCF_UN_ALL as i32);
                 }
                 record.set_header(Arc::clone(&self.header));
                 Some(Ok(()))
@@ -439,7 +439,7 @@ impl Read for IndexedReader {
                 // SAFETY: record.inner is valid after a successful bcf_copy.
                 unsafe {
                     // Always unpack record.
-                    htslib::bcf_unpack(record.inner_mut(), htslib::BCF_UN_ALL as i32);
+                    record::bcf_unpack_rs(record.inner_mut(), htslib::BCF_UN_ALL as i32);
                 }
 
                 record.set_header(Arc::clone(&self.header));

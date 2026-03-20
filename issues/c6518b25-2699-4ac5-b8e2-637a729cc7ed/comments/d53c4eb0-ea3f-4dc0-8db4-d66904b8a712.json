@@ -1,0 +1,8 @@
+{
+  "uuid": "d53c4eb0-ea3f-4dc0-8db4-d66904b8a712",
+  "issue_uuid": "c6518b25-2699-4ac5-b8e2-637a729cc7ed",
+  "author": "anon-df5e95db",
+  "content": "Unlocked by CL-7. The C function (65 lines) finds the existing tag, compares the old string length with the new one, shifts the data buffer if lengths differ, and writes the new NUL-terminated string. Our aux_tag_search + aux_payload_size handle the find+old-size logic. The resize pattern is the same as bam_aux_update_int.",
+  "created_at": "2026-03-20T13:13:56.686565Z",
+  "kind": "plan"
+}

@@ -1,0 +1,8 @@
+{
+  "uuid": "8299efc4-3d80-45ee-bbdf-f05048de0811",
+  "issue_uuid": "2e0ee2b1-e162-44ec-ae14-5757fad1b214",
+  "author": "anon-df5e95db",
+  "content": "Delivered: Refactored all BCF decoding helpers to return Option instead of raw tuples. bcf_dec_int1 now returns None on unknown types (prevents infinite loop). bcf_dec_size and bcf_dec_typed_int1 also return Option with bounds checking on all slice accesses. Added BCF_BT_INT64 constant (review #5), expanded BCF_TYPE_SHIFT to 16 entries matching C (review #10), extracted char_field_len helper using memchr (review #7), added crealloc wrapper that aborts on null (review #3), decomposed bcf_unpack_rs into 4 per-phase functions (review #11), added INFO v1 scalar comparison to differential tests (review #9). All 217 tests pass, clippy clean.",
+  "created_at": "2026-03-20T10:43:37.427488Z",
+  "kind": "result"
+}

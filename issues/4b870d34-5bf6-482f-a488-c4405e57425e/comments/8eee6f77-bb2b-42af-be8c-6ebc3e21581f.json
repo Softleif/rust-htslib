@@ -1,0 +1,8 @@
+{
+  "uuid": "8eee6f77-bb2b-42af-be8c-6ebc3e21581f",
+  "issue_uuid": "4b870d34-5bf6-482f-a488-c4405e57425e",
+  "author": "anon-df5e95db",
+  "content": "sam_hdr_parse (12 lines wrapper, but delegates to complex internal parsing): parses @HD, @SQ, @RG, @PG lines from SAM header text into the bam_hdr_t struct's internal data structures including target name/length arrays and hash tables. Used in HeaderView::from_bytes. A Rust replacement would parse the text into Rust-owned data structures (Vec of target names+lengths, HashMap for name→tid) and only construct a minimal C struct for FFI compatibility with remaining C functions.",
+  "created_at": "2026-03-20T14:38:48.421098Z",
+  "kind": "plan"
+}

@@ -1,0 +1,8 @@
+{
+  "uuid": "e2697d05-9075-4675-a107-b3adc38571db",
+  "issue_uuid": "3be27418-e51c-439f-baf9-16c1a94263b4",
+  "author": "anon-df5e95db",
+  "content": "Created 14 BAM Rust migration issues with full dependency graph:\n\nPHASE 1 — Immediate (no blockers):\n  #62: bam_aux_append → completes entire aux pipeline in Rust\n  #63: bam_copy1 → pure Rust Record cloning\n  #64: sam_parse1 → pure Rust SAM text parsing\n  #74: sam_hdr_dup/destroy → Rust header lifecycle\n  #75: sam_hdr_parse → Rust header text parsing\n\nPHASE 2 — Architecture decision:\n  #65: Evaluate bgzf/noodles-bgzf crate (BLOCKS EVERYTHING BELOW)\n\nPHASE 3 — I/O layer (blocked by #65):\n  #66: hts_open/close → Rust file handle management\n  #67: sam_hdr_read/write → Rust binary header I/O\n  #68: sam_read1 → Rust BAM record reader (also blocked by #64)\n  #69: sam_write1 → Rust BAM record writer\n\nPHASE 4 — Index/iteration (blocked by #65, #68, #70):\n  #70: BAI/CSI index reader\n  #71: Region query (blocked by #70)\n  #72: hts_itr_next (blocked by #65, #68, #71)\n\nPHASE 5 — Pileup (blocked by #68):\n  #73: Pure Rust pileup engine\n\nDependency tree:\n                #62 #63 #64 #74 #75  (no blockers)\n                          |\n                         #65          (BGZF crate evaluation)\n                     /  / | \\  \\ \n                  #66 #67 #68 #69 #70\n                          |        |\n                          |       #71\n                          |      / |\n                         #72 ---/  |\n                          |\n                         #73\n\nTotal: replacing all BAM FFI requires ~14 issues across 5 phases.\nPhase 1 can start immediately. Phase 2 (#65) is the critical gate.",
+  "created_at": "2026-03-20T14:42:14.230682Z",
+  "kind": "result"
+}

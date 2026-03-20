@@ -1,0 +1,8 @@
+{
+  "uuid": "eb224190-a3cc-4cdd-8294-fa3b540a2a68",
+  "issue_uuid": "76681e69-edbf-4a2b-8d46-dc0e841308c4",
+  "author": "anon-df5e95db",
+  "content": "Unlocked by CL-6 (bcf_unpack) + CL-26 (bcf_hdr_id2int). The workhorse: 120-line C function that encodes typed values into the shared binary block's INFO section. Called by push_info_integer, push_info_float, push_info_string, push_info_flag, and all clear_info_* methods. Replacing this makes the entire BCF INFO write pipeline FFI-free. Needs bcf_enc_vint (variable-length integer encoder) and shared-block resize logic.",
+  "created_at": "2026-03-20T13:16:09.681743Z",
+  "kind": "plan"
+}

@@ -1,0 +1,8 @@
+{
+  "uuid": "1848b723-ca90-4be9-ac07-e46f549f8800",
+  "issue_uuid": "528e6daf-7620-424b-b143-4b3a6645fa2e",
+  "author": "anon-df5e95db",
+  "content": "sam_hdr_dup (65 lines): deep-copies a bam_hdr_t including text, target arrays, and internal hash tables. sam_hdr_destroy (24 lines): refcounted free. Currently used in HeaderView Clone and Drop. Replacing these requires either: (1) owning the header data in Rust (Vec<u8> for text, Vec<String> for target names) and only keeping the C struct for FFI compatibility, or (2) full Rust header struct. The caches we added (tid_by_name HashMap) already duplicate some of this. This is the path toward a fully Rust-owned HeaderView.",
+  "created_at": "2026-03-20T14:38:43.125496Z",
+  "kind": "plan"
+}

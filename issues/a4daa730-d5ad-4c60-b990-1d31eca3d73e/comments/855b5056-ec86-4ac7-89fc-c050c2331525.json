@@ -1,0 +1,8 @@
+{
+  "uuid": "855b5056-ec86-4ac7-89fc-c050c2331525",
+  "issue_uuid": "a4daa730-d5ad-4c60-b990-1d31eca3d73e",
+  "author": "anon-df5e95db",
+  "content": "hts_open (wrapper, dispatches to bgzf_open for BAM) opens the file and detects format. hts_close flushes and closes. Replacing these means: (1) open the file in Rust, (2) detect BAM/SAM/CRAM from magic bytes (we already have check_bgzf_header), (3) wrap in the appropriate reader (BGZF for BAM, plain for SAM). Depends on pure Rust BGZF (#65). For CRAM, we'd still need FFI — but BAM+SAM can be pure Rust.",
+  "created_at": "2026-03-20T14:36:52.488158Z",
+  "kind": "plan"
+}

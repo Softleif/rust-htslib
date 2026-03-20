@@ -1,0 +1,8 @@
+{
+  "uuid": "e06e935f-8892-4fa1-8d20-bad55e65c3bf",
+  "issue_uuid": "c9f881d2-4f89-4141-87a1-5567e7f228b5",
+  "author": "anon-df5e95db",
+  "content": "Unlocked by CL-6. 30-line C function: calls bcf_unpack, checks if ID is '.', either replaces or appends with ';' separator. Same shared-block rewrite pattern as bcf_update_id.",
+  "created_at": "2026-03-20T13:15:11.382933Z",
+  "kind": "plan"
+}

@@ -1,0 +1,8 @@
+{
+  "uuid": "09b87d6d-3499-4fe0-b5b6-dd40c2ebe614",
+  "issue_uuid": "4308afd1-5e6b-4609-bbe6-ec10288d84a5",
+  "author": "anon-df5e95db",
+  "content": "Delivered: Replaced tbx_name2id and tbx_seqnames with cached Rust lookups. Reader now pre-builds cached_seqnames Vec<String> and tid_by_name HashMap<String, u64> at construction from C FFI (called once). tid() and seqnames() are now pure Rust with zero FFI. 4 differential tests verify equivalence with C oracle. Created CL-34 for inline string type investigation. All 251 tests pass, clippy clean.",
+  "created_at": "2026-03-20T12:35:00.250770Z",
+  "kind": "result"
+}

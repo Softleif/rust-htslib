@@ -1,0 +1,8 @@
+{
+  "uuid": "8b7b0a04-5b51-4417-9ba3-5454cfc233ac",
+  "issue_uuid": "1e2664b4-7ee7-4a2e-bb1a-a429318affd5",
+  "author": "anon-df5e95db",
+  "content": "sam_index_load/load2 are thin wrappers around hts_idx_load3 which reads .bai or .csi index files. The BAI format is well-documented (binary, bin-based). noodles-bam has a pure Rust BAI reader. Depends on pure Rust BGZF (#65) for virtual offset arithmetic, but the index itself is a separate binary format.",
+  "created_at": "2026-03-20T14:37:44.599941Z",
+  "kind": "plan"
+}

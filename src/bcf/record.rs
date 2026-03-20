@@ -129,6 +129,68 @@ unsafe fn crealloc<T>(ptr: *mut T, count: usize) -> *mut T {
     new as *mut T
 }
 
+/// RAII wrapper for a C-compatible `kbitset_t`, replacing `kbs_init`/`kbs_insert`/`kbs_destroy`.
+///
+/// Allocates via `libc::malloc` so the pointer can be passed to C functions like
+/// `bcf_remove_allele_set`. Freed on drop via `libc::free`.
+struct KBitSet {
+    ptr: *mut htslib::kbitset_t,
+}
+
+impl KBitSet {
+    /// Create a bitset from a boolean slice. `bits[i] == true` means bit `i` is set.
+    fn from_bools(bits: &[bool]) -> Self {
+        let ni = bits.len();
+        let elt_bits = std::mem::size_of::<libc::c_ulong>() * 8;
+        // Match C: n = (ni + KBS_ELTBITS - 1) / KBS_ELTBITS  (ceiling division)
+        let n_slots = ni.div_ceil(elt_bits);
+        // Alloc: sizeof(kbitset_t) already includes b[1], plus n_slots extra ulongs
+        let alloc_size = std::mem::size_of::<htslib::kbitset_t>()
+            + n_slots * std::mem::size_of::<libc::c_ulong>();
+        let ptr = unsafe { libc::malloc(alloc_size) as *mut htslib::kbitset_t };
+        if ptr.is_null() {
+            std::process::abort();
+        }
+        unsafe {
+            // Match C: bs->n = bs->n_max = n  (both store the slot count)
+            (*ptr).n = n_slots;
+            (*ptr).n_max = n_slots;
+            // Zero all bit slots (n_slots data + 1 sentinel)
+            std::ptr::write_bytes((*ptr).b.as_mut_ptr(), 0, n_slots + 1);
+            // Sentinel at b[n_slots]: matches kbs_last_mask = KBS_MASK(ni) - 1
+            let last_mask = {
+                let m = (1usize << (ni % elt_bits)) as libc::c_ulong;
+                let mask = m.wrapping_sub(1);
+                if mask == 0 {
+                    !0 as libc::c_ulong
+                } else {
+                    mask
+                }
+            };
+            *(*ptr).b.as_mut_ptr().add(n_slots) = last_mask;
+            // Set individual bits
+            for (i, &set) in bits.iter().enumerate() {
+                if set {
+                    let elt = i / elt_bits;
+                    let mask = (1usize << (i % elt_bits)) as libc::c_ulong;
+                    *(*ptr).b.as_mut_ptr().add(elt) |= mask;
+                }
+            }
+        }
+        KBitSet { ptr }
+    }
+
+    fn as_ptr(&self) -> *const htslib::kbitset_t {
+        self.ptr
+    }
+}
+
+impl Drop for KBitSet {
+    fn drop(&mut self) {
+        unsafe { libc::free(self.ptr as *mut libc::c_void) };
+    }
+}
+
 /// Pure Rust replacement for `htslib::bcf_unpack`.
 ///
 /// Parses the binary BCF data in `b->shared` and `b->indiv` and populates
@@ -1617,26 +1679,12 @@ impl Record {
     }
 
     pub fn remove_alleles(&mut self, remove: &[bool]) -> Result<()> {
-        // SAFETY: kbs_init allocates a bitset of the given size.
-        let rm_set = unsafe { htslib::kbs_init(remove.len()) };
-
-        for (i, &r) in remove.iter().enumerate() {
-            if r {
-                // SAFETY: rm_set is valid; i is within the allocated bitset size.
-                unsafe {
-                    htslib::kbs_insert(rm_set, i as i32);
-                }
-            }
-        }
-
-        // SAFETY: self.header().inner and self.inner are non-null; rm_set is a valid bitset.
-        let ret = unsafe { htslib::bcf_remove_allele_set(self.header().inner, self.inner, rm_set) };
-
-        // SAFETY: rm_set was allocated by kbs_init; kbs_destroy is symmetric.
-        unsafe {
-            htslib::kbs_destroy(rm_set);
-        }
-
+        let rm_set = KBitSet::from_bools(remove);
+        // SAFETY: self.header().inner and self.inner are non-null; rm_set is a valid C-compatible kbitset_t.
+        let ret = unsafe {
+            htslib::bcf_remove_allele_set(self.header().inner, self.inner, rm_set.as_ptr())
+        };
+        // rm_set is freed on drop
         match ret {
             -1 => Err(Error::RemoveAlleles),
             _ => Ok(()),
@@ -2623,6 +2671,103 @@ mod bcf_unpack_tests {
         while let Some(Ok(())) = reader.read(&mut record) {
             // Record was unpacked by C via read(). Now test Rust re-unpack.
             unsafe { assert_unpack_equivalence(&mut record) };
+        }
+    }
+}
+
+#[cfg(test)]
+mod kbitset_tests {
+    use super::*;
+
+    /// Build a kbitset_t using the C FFI (kbs_init + kbs_insert) as oracle.
+    /// Returns a raw pointer that must be freed with kbs_destroy.
+    unsafe fn kbitset_from_bools_c(bits: &[bool]) -> *mut htslib::kbitset_t {
+        let bs = htslib::kbs_init(bits.len());
+        for (i, &set) in bits.iter().enumerate() {
+            if set {
+                htslib::kbs_insert(bs, i as i32);
+            }
+        }
+        bs
+    }
+
+    /// Compare C and Rust kbitset_t structs for identical bit patterns.
+    unsafe fn assert_kbitset_eq(c_bs: *const htslib::kbitset_t, rs_bs: &KBitSet, label: &str) {
+        let c = &*c_bs;
+        let r = &*rs_bs.as_ptr();
+        assert_eq!(c.n, r.n, "{label}: n mismatch");
+        assert_eq!(c.n_max, r.n_max, "{label}: n_max mismatch");
+        // Compare all bit slots including sentinel
+        for i in 0..=c.n {
+            let c_val = *c.b.as_ptr().add(i);
+            let r_val = *r.b.as_ptr().add(i);
+            assert_eq!(c_val, r_val, "{label}: b[{i}] mismatch");
+        }
+    }
+
+    #[test]
+    fn kbitset_matches_c_empty() {
+        let bits = vec![false; 10];
+        let rs = KBitSet::from_bools(&bits);
+        unsafe {
+            let c = kbitset_from_bools_c(&bits);
+            assert_kbitset_eq(c, &rs, "empty 10-bit");
+            htslib::kbs_destroy(c);
+        }
+    }
+
+    #[test]
+    fn kbitset_matches_c_all_set() {
+        let bits = vec![true; 10];
+        let rs = KBitSet::from_bools(&bits);
+        unsafe {
+            let c = kbitset_from_bools_c(&bits);
+            assert_kbitset_eq(c, &rs, "all-set 10-bit");
+            htslib::kbs_destroy(c);
+        }
+    }
+
+    #[test]
+    fn kbitset_matches_c_various_sizes() {
+        // Test sizes that cross ulong boundaries (64-bit)
+        for size in [0, 1, 2, 7, 8, 31, 32, 33, 63, 64, 65, 127, 128, 129, 256] {
+            let bits: Vec<bool> = (0..size).map(|i| i % 3 == 0 || i % 7 == 0).collect();
+            let rs = KBitSet::from_bools(&bits);
+            unsafe {
+                let c = kbitset_from_bools_c(&bits);
+                assert_kbitset_eq(c, &rs, &format!("pattern size={size}"));
+                htslib::kbs_destroy(c);
+            }
+        }
+    }
+
+    #[test]
+    fn kbitset_matches_c_single_bits() {
+        for size in [1, 64, 65, 128] {
+            for bit in [0, size / 2, size - 1] {
+                let mut bits = vec![false; size];
+                bits[bit] = true;
+                let rs = KBitSet::from_bools(&bits);
+                unsafe {
+                    let c = kbitset_from_bools_c(&bits);
+                    assert_kbitset_eq(c, &rs, &format!("single bit={bit} size={size}"));
+                    htslib::kbs_destroy(c);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn remove_alleles_matches_existing_test() {
+        // Reproduce the existing test_remove_alleles from mod.rs
+        use crate::bcf::Read;
+        let mut bcf = crate::bcf::Reader::from_path("test/test_multi.bcf").unwrap();
+        for res in bcf.records() {
+            let mut record = res.unwrap();
+            if record.pos() == 10080 {
+                record.remove_alleles(&[false, false, true]).unwrap();
+                assert_eq!(record.alleles(), [b"A", b"C"]);
+            }
         }
     }
 }

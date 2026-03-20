@@ -1,0 +1,10 @@
+{
+  "uuid": "c6518b25-2699-4ac5-b8e2-637a729cc7ed",
+  "display_id": 39,
+  "title": "Replace bam_aux_update_str with pure Rust buffer manipulation",
+  "status": "open",
+  "priority": "high",
+  "created_by": "anon-df5e95db",
+  "created_at": "2026-03-20T13:13:53.341334Z",
+  "updated_at": "2026-03-20T13:13:53.341334Z"
+}

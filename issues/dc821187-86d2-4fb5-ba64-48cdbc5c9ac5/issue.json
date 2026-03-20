@@ -1,0 +1,10 @@
+{
+  "uuid": "dc821187-86d2-4fb5-ba64-48cdbc5c9ac5",
+  "display_id": 52,
+  "title": "Replace bcf_translate with pure Rust header translation",
+  "status": "open",
+  "priority": "medium",
+  "created_by": "anon-df5e95db",
+  "created_at": "2026-03-20T13:16:16.297566Z",
+  "updated_at": "2026-03-20T13:16:16.297566Z"
+}

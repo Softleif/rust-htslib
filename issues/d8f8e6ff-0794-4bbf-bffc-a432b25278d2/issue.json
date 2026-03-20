@@ -1,0 +1,10 @@
+{
+  "uuid": "d8f8e6ff-0794-4bbf-bffc-a432b25278d2",
+  "display_id": 41,
+  "title": "Replace bcf_get_fmt with pure Rust header lookup + array index",
+  "status": "open",
+  "priority": "high",
+  "created_by": "anon-df5e95db",
+  "created_at": "2026-03-20T13:14:19.060332Z",
+  "updated_at": "2026-03-20T13:14:19.060332Z"
+}

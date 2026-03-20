@@ -1,0 +1,10 @@
+{
+  "uuid": "fd61fe9e-9abf-419f-a04c-cda247f3fd4e",
+  "display_id": 73,
+  "title": "Replace BAM pileup engine with pure Rust implementation",
+  "status": "open",
+  "priority": "low",
+  "created_by": "anon-df5e95db",
+  "created_at": "2026-03-20T14:38:34.123018Z",
+  "updated_at": "2026-03-20T14:38:34.123018Z"
+}

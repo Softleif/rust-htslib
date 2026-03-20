@@ -1,0 +1,8 @@
+{
+  "uuid": "f61eb48e-73db-4744-b8c8-696ca9f67097",
+  "issue_uuid": "09ebe9d7-ec20-41a0-b4da-1390b1f8219c",
+  "author": "anon-df5e95db",
+  "content": "Delivered: Replaced hts_get_format with direct (*hts_file).format.format field access and hts_get_bgzfp with direct (*hts_file).fp.bgzf field access in tbx/mod.rs. Both are trivial struct field reads — no FFI overhead. 2 differential tests verify pointer/value equivalence with C functions. All 253 tests pass, clippy clean.",
+  "created_at": "2026-03-20T13:03:29.082168Z",
+  "kind": "result"
+}

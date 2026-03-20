@@ -1,0 +1,8 @@
+{
+  "uuid": "d98beb08-0a79-4272-a58e-396d2cd698f1",
+  "issue_uuid": "6bff88c7-4695-4bc4-84ac-029b0432a8d6",
+  "author": "anon-df5e95db",
+  "content": "Delivered: Replaced sam_hdr_name2tid and sam_hdr_tid2name with pure Rust. HeaderView now pre-builds a HashMap<Vec<u8>, u32> cache for name→tid at construction. tid2name uses direct C array indexing with bounds check (no FFI call). 3 differential tests verify equivalence with C oracle. Created follow-up CL-31 for HashMap key efficiency refactor across all caches. All 239 tests pass, clippy clean.",
+  "created_at": "2026-03-20T12:22:23.117173Z",
+  "kind": "result"
+}

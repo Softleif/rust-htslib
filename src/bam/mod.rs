@@ -24,6 +24,7 @@ use std::slice;
 use std::str;
 use std::sync::Arc;
 
+use cstr8::{CStr8, CompactCStr8};
 use url::Url;
 
 use crate::htslib;
@@ -874,8 +875,10 @@ impl IndexedReader {
                 self._fetch_by_coord_tuple(tid, start, stop)
             }
             FetchDefinition::RegionString(s, start, stop) => {
-                let tid = self.header().tid(s);
-                match tid {
+                match CompactCStr8::from_utf8(s)
+                    .ok()
+                    .and_then(|s| self.header().tid(&s))
+                {
                     Some(tid) => self._fetch_by_coord_tuple(tid as i32, start, stop),
                     None => Err(Error::Fetch),
                 }
@@ -889,8 +892,10 @@ impl IndexedReader {
             }
             FetchDefinition::String(s) => {
                 // either a target-name or a samtools style definition
-                let tid = self.header().tid(s);
-                match tid {
+                match CompactCStr8::from_utf8(s)
+                    .ok()
+                    .and_then(|cs| self.header().tid(&cs))
+                {
                     Some(tid) => {
                         //'large position' spec says target len must will fit into an i64.
                         let len: i64 = self.header.target_len(tid).unwrap().try_into().unwrap();
@@ -1596,7 +1601,7 @@ pub struct HeaderView {
     inner: *mut htslib::bam_hdr_t,
     /// Cached name→tid lookup for O(1) reverse mapping.
     /// Keys are borrowed from the C header's target_name array at construction.
-    tid_by_name: std::collections::HashMap<Vec<u8>, u32>,
+    tid_by_name: std::collections::HashMap<CompactCStr8, u32>,
 }
 
 // SAFETY: HeaderView owns its bam_hdr_t pointer; header data is read-only after construction.
@@ -1647,7 +1652,7 @@ impl HeaderView {
     /// `inner` must be a valid, non-null pointer to an initialized `bam_hdr_t`.
     unsafe fn build_tid_cache(
         inner: *const htslib::bam_hdr_t,
-    ) -> std::collections::HashMap<Vec<u8>, u32> {
+    ) -> std::collections::HashMap<CompactCStr8, u32> {
         let n = (*inner).n_targets as usize;
         if n == 0 || (*inner).target_name.is_null() {
             return std::collections::HashMap::new();
@@ -1656,8 +1661,9 @@ impl HeaderView {
         let mut map = std::collections::HashMap::with_capacity(n);
         for (tid, &name_ptr) in names.iter().enumerate() {
             if !name_ptr.is_null() {
-                let name = ffi::CStr::from_ptr(name_ptr).to_bytes().to_vec();
-                map.insert(name, tid as u32);
+                if let Ok(name) = CompactCStr8::from_ptr(name_ptr as *const u8) {
+                    map.insert(name, tid as u32);
+                }
             }
         }
         map
@@ -1687,7 +1693,7 @@ impl HeaderView {
         self.inner
     }
 
-    pub fn tid(&self, name: &[u8]) -> Option<u32> {
+    pub fn tid(&self, name: &CStr8) -> Option<u32> {
         self.tid_by_name.get(name).copied()
     }
 
@@ -1769,6 +1775,7 @@ mod tests {
     use super::header::HeaderRecord;
     use super::record::{Aux, Cigar, CigarString};
     use super::*;
+    use cstr8::cstr8;
     use std::collections::HashMap;
     use std::fs;
     use std::path::Path;
@@ -1941,8 +1948,14 @@ CCCCCCCCCCCCCCCCCCC"[..],
         let (names, flags, seqs, quals, cigars) = gold();
         let sq_1 = b"CHROMOSOME_I";
         let sq_2 = b"CHROMOSOME_II";
-        let tid_1 = bam.header.tid(sq_1).expect("Expected tid.");
-        let tid_2 = bam.header.tid(sq_2).expect("Expected tid.");
+        let tid_1 = bam
+            .header
+            .tid(cstr8!("CHROMOSOME_I"))
+            .expect("Expected tid.");
+        let tid_2 = bam
+            .header
+            .tid(cstr8!("CHROMOSOME_II"))
+            .expect("Expected tid.");
         assert!(bam.header.target_len(tid_1).expect("Expected target len.") == 15072423);
 
         // fetch to position containing reads
@@ -2540,7 +2553,7 @@ CCCCCCCCCCCCCCCCCCC"[..],
             pileup.unwrap();
         }
         // go back again
-        let tid = bam.header().tid(b"CHROMOSOME_I").unwrap();
+        let tid = bam.header().tid(cstr8!("CHROMOSOME_I")).unwrap();
         bam.fetch((tid, 0, 5)).unwrap();
         for p in bam.pileup() {
             println!("{}", p.unwrap().pos())
@@ -3487,8 +3500,9 @@ CCCCCCCCCCCCCCCCCCC"[..],
             let c_str = ffi::CString::new(name).unwrap();
             let c_tid =
                 unsafe { htslib::sam_hdr_name2tid(header.inner_ptr() as *mut _, c_str.as_ptr()) };
+            let name_cstr8 = cstr8::CString8::new(std::str::from_utf8(name).unwrap()).unwrap();
             assert_eq!(
-                header.tid(name),
+                header.tid(&name_cstr8),
                 Some(c_tid as u32),
                 "tid mismatch for {:?}",
                 std::str::from_utf8(name)
@@ -3514,7 +3528,7 @@ CCCCCCCCCCCCCCCCCCC"[..],
     fn tid_absent_name_returns_none() {
         let bam = Reader::from_path("test/test.bam").expect("Error opening file.");
         let header = bam.header();
-        assert_eq!(header.tid(b"nonexistent_chr"), None);
+        assert_eq!(header.tid(cstr8!("nonexistent_chr")), None);
         let c_tid = unsafe {
             let c_str = ffi::CString::new("nonexistent_chr").unwrap();
             htslib::sam_hdr_name2tid(header.inner_ptr() as *mut _, c_str.as_ptr())

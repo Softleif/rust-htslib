@@ -11,6 +11,7 @@
 //!   - Output sample index given a sample name of a VCF file.
 //! ```
 //! use crate::rust_htslib::bcf::{Reader, Read};
+//! use cstr8::cstr8;
 //! use std::io::Read as IoRead;
 //!
 //! let path = &"test/test_string.vcf";
@@ -28,20 +29,19 @@
 //!
 //! assert_eq!(header.contig_count(), 1); // Number of contig in header.
 //! // obtain the data type of an INFO field
-//! let (tag_type, tag_length) = header.info_type(b"S1").unwrap();
-//! let (fmt_type, fmt_length) = header.format_type(b"GT").unwrap();
+//! let (tag_type, tag_length) = header.info_type(cstr8!("S1")).unwrap();
+//! let (fmt_type, fmt_length) = header.format_type(cstr8!("GT")).unwrap();
 //! ```
 
 use std::collections::HashMap;
 use std::ffi;
 use std::os::raw::c_char;
 use std::slice;
-use std::str;
 use std::sync::Arc;
 
 use crate::htslib;
 
-use cstr8::CStr8;
+use cstr8::{CStr8, CompactCStr8};
 use linear_map::LinearMap;
 
 use crate::bcf::BcfError as Error;
@@ -297,7 +297,7 @@ pub struct HeaderView {
     pub(crate) inner: *mut htslib::bcf_hdr_t,
     /// Pre-built name→id caches for O(1) lookups, one per BCF_DT_* dictionary.
     /// Replaces the opaque C khash tables that are inaccessible from Rust.
-    id_cache: [HashMap<Vec<u8>, i32>; BCF_DICT_COUNT],
+    id_cache: [HashMap<CompactCStr8, i32>; BCF_DICT_COUNT],
 }
 
 // SAFETY: HeaderView owns its inner pointer exclusively; no shared mutable state.
@@ -311,7 +311,7 @@ unsafe impl Sync for HeaderView {}
 /// `inner` must be a valid, non-null pointer to an initialized `bcf_hdr_t`.
 unsafe fn build_id_caches(
     inner: *const htslib::bcf_hdr_t,
-) -> [HashMap<Vec<u8>, i32>; BCF_DICT_COUNT] {
+) -> [HashMap<CompactCStr8, i32>; BCF_DICT_COUNT] {
     let hdr = &*inner;
     std::array::from_fn(|which| {
         let n = hdr.n[which] as usize;
@@ -324,7 +324,10 @@ unsafe fn build_id_caches(
             if entry.key.is_null() {
                 continue;
             }
-            let key = ffi::CStr::from_ptr(entry.key).to_bytes().to_vec();
+            let key = match CompactCStr8::from_ptr(entry.key as *const u8) {
+                Ok(k) => k,
+                Err(_) => continue,
+            };
             let id = (*entry.val).id;
             map.insert(key, id);
         }
@@ -344,7 +347,7 @@ impl HeaderView {
 
     /// Look up a name in one of the three BCF dictionaries.
     /// Returns the numeric ID, or `None` if the name is not found.
-    fn dict_lookup(&self, which: usize, name: &[u8]) -> Option<i32> {
+    fn dict_lookup(&self, which: usize, name: &CStr8) -> Option<i32> {
         self.id_cache[which].get(name).copied()
     }
 
@@ -407,6 +410,7 @@ impl HeaderView {
     /// Retrieve the (internal) chromosome identifier
     /// # Examples
     /// ```rust
+    /// use cstr8::cstr8;
     /// use rust_htslib::bcf::header::Header;
     /// use rust_htslib::bcf::{Format, Writer};
     ///
@@ -415,33 +419,33 @@ impl HeaderView {
     /// header.push_record(contig_field);
     /// let mut vcf = Writer::from_stdout(&header, true, Format::Vcf).unwrap();
     /// let header_view = vcf.header();
-    /// let rid = header_view.name2rid(b"foo").unwrap();
+    /// let rid = header_view.name2rid(cstr8!("foo")).unwrap();
     /// assert_eq!(rid, 0);
     /// // try and retrieve a contig not in the header
-    /// let result = header_view.name2rid(b"bar");
+    /// let result = header_view.name2rid(cstr8!("bar"));
     /// assert!(result.is_err())
     /// ```
     /// # Errors
     /// If `name` does not match a chromosome currently in the VCF header, returns [`BcfError::UnknownContig`]
-    pub fn name2rid(&self, name: &[u8]) -> Result<u32> {
+    pub fn name2rid(&self, name: &CStr8) -> Result<u32> {
         match self.dict_lookup(htslib::BCF_DT_CTG as usize, name) {
             Some(id) => Ok(id as u32),
             None => Err(Error::UnknownContig {
-                contig: str::from_utf8(name).unwrap().to_owned(),
+                contig: name.as_str().to_owned(),
             }),
         }
     }
 
-    pub fn info_type(&self, tag: &[u8]) -> Result<(TagType, TagLength)> {
+    pub fn info_type(&self, tag: &CStr8) -> Result<(TagType, TagLength)> {
         self.tag_type(tag, htslib::BCF_HL_INFO)
     }
 
-    pub fn format_type(&self, tag: &[u8]) -> Result<(TagType, TagLength)> {
+    pub fn format_type(&self, tag: &CStr8) -> Result<(TagType, TagLength)> {
         self.tag_type(tag, htslib::BCF_HL_FMT)
     }
 
-    fn tag_type(&self, tag: &[u8], hdr_type: ::libc::c_uint) -> Result<(TagType, TagLength)> {
-        let tag_desc = || str::from_utf8(tag).unwrap().to_owned();
+    fn tag_type(&self, tag: &CStr8, hdr_type: ::libc::c_uint) -> Result<(TagType, TagLength)> {
+        let tag_desc = || tag.as_str().to_owned();
         let id = self
             .dict_lookup(htslib::BCF_DT_ID as usize, tag)
             .ok_or_else(|| Error::UndefinedTag { tag: tag_desc() })?;
@@ -475,7 +479,7 @@ impl HeaderView {
 
     /// Convert string ID (e.g., for a `FILTER` value) to its numeric identifier.
     pub fn name_to_id(&self, id: &CStr8) -> Result<Id> {
-        match self.dict_lookup(htslib::BCF_DT_ID as usize, id.as_bytes()) {
+        match self.dict_lookup(htslib::BCF_DT_ID as usize, id) {
             Some(i) => Ok(Id(i as u32)),
             None => Err(Error::UnknownID { id: id.into() }),
         }
@@ -502,11 +506,11 @@ impl HeaderView {
     }
 
     /// Convert string sample name to its numeric identifier.
-    pub fn sample_to_id(&self, id: &[u8]) -> Result<Id> {
+    pub fn sample_to_id(&self, id: &CStr8) -> Result<Id> {
         match self.dict_lookup(htslib::BCF_DT_SAMPLE as usize, id) {
             Some(i) => Ok(Id(i as u32)),
             None => Err(Error::UnknownSample {
-                name: str::from_utf8(id).unwrap().to_owned(),
+                name: id.as_str().to_owned(),
             }),
         }
     }
@@ -817,7 +821,8 @@ mod bcf_hdr_id2int_tests {
             let (_tmp, hdr) = build_header(&contigs, &[], &[], &[], &[]);
             for name in &contigs {
                 let c_result = id2int_c(&hdr, htslib::BCF_DT_CTG as i32, name.as_bytes());
-                let rs_result = hdr.name2rid(name.as_bytes());
+                let cs = cstr8::CString8::new(name.as_str()).expect("valid CString8");
+                let rs_result = hdr.name2rid(&cs);
                 match rs_result {
                     Ok(id) => prop_assert_eq!(c_result, id as i32, "contig {}", name),
                     Err(_) => prop_assert_eq!(c_result, -1, "contig {} expected not found", name),
@@ -834,7 +839,8 @@ mod bcf_hdr_id2int_tests {
             let (_tmp, hdr) = build_header(&contigs, &[], &[], &[], &[]);
             if !contigs.contains(&query) {
                 let c_result = id2int_c(&hdr, htslib::BCF_DT_CTG as i32, query.as_bytes());
-                let rs_result = hdr.name2rid(query.as_bytes());
+                let cs = cstr8::CString8::new(query.as_str()).expect("valid CString8");
+                let rs_result = hdr.name2rid(&cs);
                 prop_assert_eq!(c_result, -1);
                 prop_assert!(rs_result.is_err());
             }
@@ -889,7 +895,8 @@ mod bcf_hdr_id2int_tests {
             let (_tmp, hdr) = build_header(&["chr1".into()], &[], &[], &[], &samples);
             for name in &samples {
                 let c_result = id2int_c(&hdr, htslib::BCF_DT_SAMPLE as i32, name.as_bytes());
-                let rs_result = hdr.sample_to_id(name.as_bytes());
+                let cs = cstr8::CString8::new(name.as_str()).expect("valid CString8");
+                let rs_result = hdr.sample_to_id(&cs);
                 match rs_result {
                     Ok(id) => prop_assert_eq!(c_result, *id as i32, "sample {}", name),
                     Err(_) => prop_assert_eq!(c_result, -1, "sample {} expected not found", name),
@@ -906,7 +913,8 @@ mod bcf_hdr_id2int_tests {
             let (_tmp, hdr) = build_header(&["chr1".into()], &[], &[], &[], &samples);
             if !samples.contains(&query) {
                 let c_result = id2int_c(&hdr, htslib::BCF_DT_SAMPLE as i32, query.as_bytes());
-                let rs_result = hdr.sample_to_id(query.as_bytes());
+                let cs = cstr8::CString8::new(query.as_str()).expect("valid CString8");
+                let rs_result = hdr.sample_to_id(&cs);
                 prop_assert_eq!(c_result, -1);
                 prop_assert!(rs_result.is_err());
             }

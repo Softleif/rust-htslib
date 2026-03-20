@@ -5,8 +5,9 @@
 
 use std::collections::{vec_deque, VecDeque};
 use std::mem;
-use std::str;
 use std::sync::Arc;
+
+use cstr8::CStr8;
 
 use crate::bam;
 use crate::bam::BamError;
@@ -78,7 +79,7 @@ impl RecordBuffer {
     /// Coordinates are 0-based, and end is exclusive.
     /// Returns tuple with numbers of added and deleted records since the previous fetch.
     #[allow(unused_assignments)] // TODO this is needed because rustc thinks that deleted is unused
-    pub fn fetch(&mut self, chrom: &[u8], start: u64, end: u64) -> Result<(usize, usize)> {
+    pub fn fetch(&mut self, chrom: &CStr8, start: u64, end: u64) -> Result<(usize, usize)> {
         let mut added = 0;
         // move overflow from last fetch into ringbuffer
         if self.overflow.is_some() {
@@ -154,7 +155,7 @@ impl RecordBuffer {
             Ok((added, deleted))
         } else {
             Err(Error::from(BamError::SequenceNotFound {
-                sequence: str::from_utf8(chrom).unwrap().to_owned(),
+                sequence: chrom.as_str().to_owned(),
             }))
         }
     }
@@ -182,13 +183,14 @@ impl RecordBuffer {
 mod tests {
     use super::*;
     use crate::bam;
+    use cstr8::cstr8;
 
     #[test]
     fn test_buffer() {
         let reader = bam::IndexedReader::from_path("test/test.bam").unwrap();
         let mut buffer = RecordBuffer::new(reader, false);
 
-        buffer.fetch(b"CHROMOSOME_I", 1, 5).unwrap();
+        buffer.fetch(cstr8!("CHROMOSOME_I"), 1, 5).unwrap();
         {
             let records: Vec<_> = buffer.iter().collect();
             assert_eq!(records.len(), 6);

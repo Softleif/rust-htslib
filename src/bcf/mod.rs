@@ -63,6 +63,7 @@
 //!   - Creating a VCF record and writing it to the VCF file
 //!
 //! ```
+//! use cstr8::cstr8;
 //! use rust_htslib::bcf::{Format, Writer};
 //! use rust_htslib::bcf::header::Header;
 //! use rust_htslib::bcf::record::GenotypeAllele;
@@ -80,7 +81,7 @@
 //! let mut record = vcf.empty_record();
 //!
 //! // Set chrom and pos to 1 and 7, respectively - note the 0-based positions
-//! let rid = vcf.header().name2rid(b"1").unwrap();
+//! let rid = vcf.header().name2rid(cstr8!("1")).unwrap();
 //! record.set_rid(Some(rid));
 //! record.set_pos(6);
 //!
@@ -1038,7 +1039,7 @@ mod tests {
         bcf.set_threads(2).unwrap();
         let rid = bcf
             .header()
-            .name2rid(b"1")
+            .name2rid(cstr8!("1"))
             .expect("Translating from contig '1' to ID failed.");
         bcf.fetch(rid, 10_033, Some(10_060))
             .expect("Fetching failed");
@@ -1051,7 +1052,7 @@ mod tests {
         bcf.set_threads(2).unwrap();
         let rid = bcf
             .header()
-            .name2rid(b"1")
+            .name2rid(cstr8!("1"))
             .expect("Translating from contig '1' to ID failed.");
         bcf.fetch(rid, 0, None).expect("Fetching failed");
         assert_eq!(bcf.records().count(), 62);
@@ -1063,7 +1064,7 @@ mod tests {
         bcf.set_threads(2).unwrap();
         let rid = bcf
             .header()
-            .name2rid(b"1")
+            .name2rid(cstr8!("1"))
             .expect("Translating from contig '1' to ID failed.");
         bcf.fetch(rid, 10077, None).expect("Fetching failed");
         assert_eq!(bcf.records().count(), 6);
@@ -1075,7 +1076,7 @@ mod tests {
         bcf.set_threads(2).unwrap();
         let rid = bcf
             .header()
-            .name2rid(b"1")
+            .name2rid(cstr8!("1"))
             .expect("Translating from contig '1' to ID failed.");
         bcf.fetch(rid, 20077, None).expect("Fetching failed");
         assert_eq!(bcf.records().count(), 0);
@@ -1340,9 +1341,9 @@ mod tests {
 
         assert_eq!(header.id_to_sample(Id(0)).unwrap(), b"one");
         assert_eq!(header.id_to_sample(Id(1)).unwrap(), b"two");
-        assert_eq!(header.sample_to_id(b"one").unwrap(), Id(0));
-        assert_eq!(header.sample_to_id(b"two").unwrap(), Id(1));
-        assert!(header.sample_to_id(b"three").is_err());
+        assert_eq!(header.sample_to_id(cstr8!("one")).unwrap(), Id(0));
+        assert_eq!(header.sample_to_id(cstr8!("two")).unwrap(), Id(1));
+        assert!(header.sample_to_id(cstr8!("three")).is_err());
     }
 
     #[test]
@@ -1354,13 +1355,13 @@ mod tests {
 
         // test existing contig names and IDs
         assert_eq!(header.rid2name(0).unwrap(), b"1");
-        assert_eq!(header.name2rid(b"1").unwrap(), 0);
+        assert_eq!(header.name2rid(cstr8!("1")).unwrap(), 0);
 
         assert_eq!(header.rid2name(85).unwrap(), b"hs37d5");
-        assert_eq!(header.name2rid(b"hs37d5").unwrap(), 85);
+        assert_eq!(header.name2rid(cstr8!("hs37d5")).unwrap(), 85);
 
         // test nonexistent contig names and IDs
-        assert!(header.name2rid(b"nonexistent_contig").is_err());
+        assert!(header.name2rid(cstr8!("nonexistent_contig")).is_err());
         assert!(header.rid2name(100).is_err());
     }
 
@@ -1415,7 +1416,8 @@ mod tests {
             ),
         ];
         for (ref_name, ref_type, ref_length) in truth {
-            let (tag_type, tag_length) = header.info_type(ref_name.as_bytes()).unwrap();
+            let tag_cstr = cstr8::CString8::new(ref_name).unwrap();
+            let (tag_type, tag_length) = header.info_type(&tag_cstr).unwrap();
             assert_eq!(tag_type, ref_type);
             assert_eq!(tag_length, ref_length);
         }
@@ -1449,12 +1451,13 @@ mod tests {
             ),
         ];
         for (ref_name, ref_type, ref_length) in truth {
-            let (tag_type, tag_length) = header.info_type(ref_name.as_bytes()).unwrap();
+            let tag_cstr = cstr8::CString8::new(ref_name).unwrap();
+            let (tag_type, tag_length) = header.info_type(&tag_cstr).unwrap();
             assert_eq!(tag_type, ref_type);
             assert_eq!(tag_length, ref_length);
         }
 
-        assert!(header.info_type(b"NOT_THERE").is_err());
+        assert!(header.info_type(cstr8!("NOT_THERE")).is_err());
     }
 
     #[test]

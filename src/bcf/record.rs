@@ -786,6 +786,7 @@ impl Record {
     /// up VCF, header, and record.
     ///
     /// ```
+    /// # use cstr8::cstr8;
     /// # use rust_htslib::bcf::{Format, Writer};
     /// # use rust_htslib::bcf::header::Header;
     /// # let mut header = Header::new();
@@ -794,7 +795,7 @@ impl Record {
     /// # header.push_sample("test_sample".as_bytes());
     /// # let mut vcf = Writer::from_stdout(&header, true, Format::Vcf).unwrap();
     /// # let mut record = vcf.empty_record();
-    /// let rid = record.header().name2rid(b"1").ok();
+    /// let rid = record.header().name2rid(cstr8!("1")).ok();
     /// record.set_rid(rid);
     /// assert_eq!(record.rid(), rid);
     /// let name = record.header().rid2name(record.rid().unwrap()).ok();

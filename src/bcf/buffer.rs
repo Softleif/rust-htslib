@@ -7,6 +7,8 @@ use std::cmp::Ordering;
 use std::collections::{vec_deque, VecDeque};
 use std::mem;
 
+use cstr8::CStr8;
+
 use crate::bcf::{self, BcfError, Read};
 
 type Result<T> = std::result::Result<T, BcfError>;
@@ -73,7 +75,7 @@ impl RecordBuffer {
     /// the start coordinate of any previous `fill` operation.
     /// Coordinates are 0-based, and end is exclusive.
     /// Returns tuple with numbers of added and deleted records compared to previous fetch.
-    pub fn fetch(&mut self, chrom: &[u8], start: u64, end: u64) -> Result<(usize, usize)> {
+    pub fn fetch(&mut self, chrom: &CStr8, start: u64, end: u64) -> Result<(usize, usize)> {
         // TODO panic if start is left of previous start or we have moved past the given chrom
         // before.
         let rid = self.reader.header.name2rid(chrom)?;
@@ -192,13 +194,14 @@ impl RecordBuffer {
 mod tests {
     use super::*;
     use crate::bcf;
+    use cstr8::cstr8;
 
     #[test]
     fn test_buffer() {
         let reader = bcf::Reader::from_path("test/test.bcf").unwrap();
         let mut buffer = RecordBuffer::new(reader);
 
-        buffer.fetch(b"1", 100, 10023).unwrap();
+        buffer.fetch(cstr8!("1"), 100, 10023).unwrap();
         {
             let records: Vec<_> = buffer.iter().collect();
             assert_eq!(records.len(), 2);
@@ -206,7 +209,7 @@ mod tests {
             assert_eq!(records[1].pos(), 10022);
         }
 
-        buffer.fetch(b"1", 10023, 10024).unwrap();
+        buffer.fetch(cstr8!("1"), 10023, 10024).unwrap();
         {
             let records: Vec<_> = buffer.iter().collect();
             assert_eq!(records.len(), 1);

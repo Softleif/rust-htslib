@@ -17,6 +17,7 @@
 //! # Examples
 //!
 //! ```rust,no_run
+//! use cstr8::cstr8;
 //! use rust_htslib::tbx::{self, Read};
 //!
 //! // Create a tabix reader for reading a tabix-indexed BED file.
@@ -25,7 +26,7 @@
 //!     .expect(&format!("Could not open {}", path_bed));
 //!
 //! // Resolve chromosome name to numeric ID.
-//! let tid = match tbx_reader.tid("chr1") {
+//! let tid = match tbx_reader.tid(cstr8!("chr1")) {
 //!     Ok(tid) => tid,
 //!     Err(_) => panic!("Could not resolve 'chr1' to contig ID"),
 //! };
@@ -47,6 +48,7 @@ use std::ptr;
 use url::Url;
 
 use crate::htslib;
+use cstr8::{CStr8, CompactCStr8};
 
 #[derive(thiserror::Error, Debug, PartialEq)]
 pub enum TbxError {
@@ -192,9 +194,9 @@ pub struct Reader {
     itr: Option<*mut htslib::hts_itr_t>,
 
     /// Cached sequence names (populated once at construction).
-    cached_seqnames: Vec<String>,
+    cached_seqnames: Vec<CompactCStr8>,
     /// Cached name→tid lookup (populated once at construction).
-    tid_by_name: std::collections::HashMap<String, u64>,
+    tid_by_name: std::collections::HashMap<CompactCStr8, u64>,
 
     /// The currently fetch region's tid.
     tid: i64,
@@ -269,17 +271,17 @@ impl Reader {
             let mut nseq: i32 = 0;
             let seqs = htslib::tbx_seqnames(tbx, &mut nseq);
             let mut names = Vec::with_capacity(nseq.max(0) as usize);
-            let mut tids = std::collections::HashMap::with_capacity(nseq.max(0) as usize);
+            let mut tids: std::collections::HashMap<CompactCStr8, u64> =
+                std::collections::HashMap::with_capacity(nseq.max(0) as usize);
             for i in 0..nseq {
                 let ptr = *seqs.offset(i as isize);
                 if !ptr.is_null() {
-                    if let Ok(s) = ffi::CStr::from_ptr(ptr).to_str() {
-                        let name = s.to_owned();
+                    if let Ok(key) = CompactCStr8::from_ptr(ptr as *const u8) {
                         let id = htslib::tbx_name2id(tbx, ptr);
                         if id >= 0 {
-                            tids.insert(name.clone(), id as u64);
+                            tids.insert(key.clone(), id as u64);
                         }
-                        names.push(name);
+                        names.push(key);
                     }
                 }
             }
@@ -303,12 +305,12 @@ impl Reader {
     }
 
     /// Get sequence/target ID from sequence name.
-    pub fn tid(&self, name: &str) -> Result<u64> {
+    pub fn tid(&self, name: &CStr8) -> Result<u64> {
         self.tid_by_name
             .get(name)
             .copied()
             .ok_or_else(|| TbxError::SequenceNotFound {
-                name: name.to_owned(),
+                name: name.as_str().to_owned(),
             })
     }
 
@@ -344,8 +346,8 @@ impl Reader {
     }
 
     /// Return the sequence contig names.
-    pub fn seqnames(&self) -> Vec<String> {
-        self.cached_seqnames.clone()
+    pub fn seqnames(&self) -> &[CompactCStr8] {
+        &self.cached_seqnames
     }
 
     /// Activate multi-threaded BGZF read support in htslib. This should permit faster
@@ -466,6 +468,7 @@ impl<R: Read> Iterator for Records<'_, R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cstr8::cstr8;
 
     #[test]
     fn bed_basic() {
@@ -473,15 +476,14 @@ mod tests {
             Reader::from_path("test/tabix_reader/test_bed3.bed.gz").expect("Error opening file.");
 
         // Check sequence name vector.
-        assert_eq!(
-            reader.seqnames(),
-            vec![String::from("chr1"), String::from("chr2")]
-        );
+        assert_eq!(reader.seqnames().len(), 2);
+        assert_eq!(reader.seqnames()[0], *"chr1");
+        assert_eq!(reader.seqnames()[1], *"chr2");
 
         // Check mapping between name and idx.
-        assert_eq!(reader.tid("chr1").unwrap(), 0);
-        assert_eq!(reader.tid("chr2").unwrap(), 1);
-        assert!(reader.tid("chr3").is_err());
+        assert_eq!(reader.tid(cstr8!("chr1")).unwrap(), 0);
+        assert_eq!(reader.tid(cstr8!("chr2")).unwrap(), 1);
+        assert!(reader.tid(cstr8!("chr3")).is_err());
     }
 
     #[test]
@@ -489,7 +491,7 @@ mod tests {
         let mut reader =
             Reader::from_path("test/tabix_reader/test_bed3.bed.gz").expect("Error opening file.");
 
-        let chr1_id = reader.tid("chr1").unwrap();
+        let chr1_id = reader.tid(cstr8!("chr1")).unwrap();
         assert!(reader.fetch(chr1_id, 1000, 1003).is_ok());
 
         let mut record = Vec::new();
@@ -503,7 +505,7 @@ mod tests {
         let mut reader =
             Reader::from_path("test/tabix_reader/test_bed3.bed.gz").expect("Error opening file.");
 
-        let chr1_id = reader.tid("chr1").unwrap();
+        let chr1_id = reader.tid(cstr8!("chr1")).unwrap();
         assert!(reader.fetch(chr1_id, 1000, 1003).is_ok());
 
         let records: Vec<Vec<u8>> = reader.records().map(|r| r.unwrap()).collect();
@@ -554,6 +556,7 @@ mod tests {
 #[cfg(test)]
 mod tbx_accessor_tests {
     use super::*;
+    use std::convert::TryFrom;
 
     /// Call C tbx_name2id as oracle.
     fn tid_c(reader: &Reader, name: &str) -> i32 {
@@ -584,8 +587,8 @@ mod tbx_accessor_tests {
         let reader =
             Reader::from_path("test/tabix_reader/test_bed3.bed.gz").expect("Error opening file.");
         let names = reader.seqnames();
-        for name in &names {
-            let c_tid = tid_c(&reader, name);
+        for name in names {
+            let c_tid = tid_c(&reader, name.as_str());
             let rs_tid = reader.tid(name);
             assert_eq!(rs_tid.unwrap(), c_tid as u64, "tid mismatch for {name}");
         }
@@ -598,7 +601,8 @@ mod tbx_accessor_tests {
         for name in ["chrZ", "nonexistent", "MT"] {
             let c_tid = tid_c(&reader, name);
             assert_eq!(c_tid, -1);
-            assert!(reader.tid(name).is_err());
+            let cname = CompactCStr8::try_from(name).unwrap();
+            assert!(reader.tid(&cname).is_err());
         }
     }
 
@@ -607,7 +611,11 @@ mod tbx_accessor_tests {
         let reader =
             Reader::from_path("test/tabix_reader/test_bed3.bed.gz").expect("Error opening file.");
         let c_names = seqnames_c(&reader);
-        let rs_names = reader.seqnames();
+        let rs_names: Vec<String> = reader
+            .seqnames()
+            .iter()
+            .map(|s| s.as_str().to_owned())
+            .collect();
         assert_eq!(c_names, rs_names);
     }
 

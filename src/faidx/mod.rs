@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use cstr8::CString8;
+use cstr8::{CStr8, CString8, CompactCStr8};
 
 use crate::htslib;
 
@@ -43,7 +43,7 @@ pub struct Reader {
     /// Cached sequence names, indexed by sequence ID.
     cached_names: Vec<String>,
     /// Cached sequence lengths, keyed by sequence name.
-    cached_lengths: HashMap<String, u64>,
+    cached_lengths: HashMap<CompactCStr8, u64>,
 }
 
 /// Convert a path to a C string suitable for htslib, with precise errors.
@@ -86,25 +86,26 @@ impl Reader {
     ///
     /// # Safety
     /// `inner` must be a valid, non-null pointer to an initialized `faidx_t`.
-    unsafe fn build_caches(inner: *mut htslib::faidx_t) -> (Vec<String>, HashMap<String, u64>) {
+    unsafe fn build_caches(
+        inner: *mut htslib::faidx_t,
+    ) -> (Vec<String>, HashMap<CompactCStr8, u64>) {
         let n = htslib::faidx_nseq(inner).max(0) as usize;
         let mut names = Vec::with_capacity(n);
-        let mut lengths = HashMap::with_capacity(n);
+        let mut lengths: HashMap<CompactCStr8, u64> = HashMap::with_capacity(n);
         for i in 0..n {
             let ptr = htslib::faidx_iseq(inner, i as i32);
             if ptr.is_null() {
                 continue;
             }
-            let name = match std::ffi::CStr::from_ptr(ptr).to_str() {
-                Ok(s) => s.to_owned(),
+            let key = match CompactCStr8::from_ptr(ptr as *const u8) {
+                Ok(k) => k,
                 Err(_) => continue,
             };
-            let cname = CString8::new(name.as_str()).unwrap();
-            let len = htslib::faidx_seq_len64(inner, cname.as_ptr().cast());
+            let len = htslib::faidx_seq_len64(inner, key.as_ptr().cast());
             if len >= 0 {
-                lengths.insert(name.clone(), len as u64);
+                lengths.insert(key.clone(), len as u64);
             }
-            names.push(name);
+            names.push(key.as_str().to_owned());
         }
         (names, lengths)
     }
@@ -226,8 +227,8 @@ impl Reader {
     /// Fetches the length of the given sequence name.
     ///
     /// Returns `None` if the sequence is not found in the index.
-    pub fn fetch_seq_len<N: AsRef<str>>(&self, name: N) -> Option<u64> {
-        self.cached_lengths.get(name.as_ref()).copied()
+    pub fn fetch_seq_len(&self, name: &CStr8) -> Option<u64> {
+        self.cached_lengths.get(name).copied()
     }
 
     /// Returns all sequence names.
@@ -408,9 +409,10 @@ mod tests {
 
     #[test]
     fn faidx_get_seq_len() {
+        use cstr8::cstr8;
         let r = open_reader();
-        assert_eq!(r.fetch_seq_len("chr1"), Some(120));
-        assert_eq!(r.fetch_seq_len("chr2"), Some(120));
+        assert_eq!(r.fetch_seq_len(cstr8!("chr1")), Some(120));
+        assert_eq!(r.fetch_seq_len(cstr8!("chr2")), Some(120));
     }
 
     #[test]
@@ -484,8 +486,9 @@ mod tests {
 
     #[test]
     fn faidx_seq_len_nonexistent() {
+        use cstr8::cstr8;
         let r = open_reader();
-        assert_eq!(r.fetch_seq_len("nonexistent"), None);
+        assert_eq!(r.fetch_seq_len(cstr8!("nonexistent")), None);
     }
 
     #[test]
@@ -540,7 +543,7 @@ mod faidx_cache_tests {
             let name = r.seq_name(i as i32).unwrap();
             let cname = CString8::new(name.as_str()).unwrap();
             let c_len = unsafe { htslib::faidx_seq_len64(r.inner, cname.as_ptr().cast()) };
-            let rs_len = r.fetch_seq_len(&name);
+            let rs_len = r.fetch_seq_len(&cname);
             if c_len < 0 {
                 assert_eq!(rs_len, None, "expected None for {name}");
             } else {
@@ -556,7 +559,7 @@ mod faidx_cache_tests {
         let cname = CString8::new("nonexistent_chr").unwrap();
         let c_len = unsafe { htslib::faidx_seq_len64(r.inner, cname.as_ptr().cast()) };
         assert_eq!(c_len, -1);
-        assert_eq!(r.fetch_seq_len("nonexistent_chr"), None);
+        assert_eq!(r.fetch_seq_len(&cname), None);
     }
 
     /// Out-of-bounds seq_name must return error (matching C behavior).

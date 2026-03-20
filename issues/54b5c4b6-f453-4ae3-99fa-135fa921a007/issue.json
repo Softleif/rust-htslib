@@ -1,0 +1,11 @@
+{
+  "uuid": "54b5c4b6-f453-4ae3-99fa-135fa921a007",
+  "display_id": 7,
+  "title": "Replace bam_aux_get with pure Rust tag search",
+  "description": "Replace bam_aux_get FFI call (~22 lines, linear search through auxiliary data) with pure Rust byte-slice scanning. This is a high-value leaf: it unlocks all 4 bam_aux_update_* functions (bam_aux_update_int, bam_aux_update_float, bam_aux_update_str, bam_aux_update_array). Used in src/bam/record.rs. Complexity: easy.",
+  "status": "open",
+  "priority": "high",
+  "created_by": "driver--implement-issue-1-95f4",
+  "created_at": "2026-03-20T08:37:36.770238Z",
+  "updated_at": "2026-03-20T08:37:36.770238Z"
+}

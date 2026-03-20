@@ -1,0 +1,8 @@
+{
+  "uuid": "690c0db8-0839-4c36-9dd9-be2b738a299c",
+  "issue_uuid": "1c51d34b-7f87-4333-a666-bc23a25bf7da",
+  "author": "anon-df5e95db",
+  "content": "The last remaining FFI call in the aux pipeline. 12 call sites in push_aux_unchecked — one per Aux variant (Char, I8, U8, I16, U16, I32, U32, Float, Double, String, HexByteArray, plus array variants). The C function (30 lines) appends [tag0, tag1, type, data...] bytes to the bam1_t.data buffer, growing it via realloc if needed. We already have the buffer-resize pattern from bam_aux_update_*. Pure Rust: compute needed size, call possibly_expand_bam_data equivalent, memcpy the tag+type+value bytes, bump l_data. Completing this makes the ENTIRE aux read/write/update/delete pipeline FFI-free.",
+  "created_at": "2026-03-20T14:35:41.198505Z",
+  "kind": "plan"
+}

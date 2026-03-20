@@ -1,0 +1,10 @@
+{
+  "uuid": "3ea60073-7be8-4636-84ed-4b56a66fd4f0",
+  "display_id": 20,
+  "title": "Fix aux_tag_search to return offset instead of raw pointer",
+  "status": "open",
+  "priority": "high",
+  "created_by": "anon-df5e95db",
+  "created_at": "2026-03-20T10:23:00.462051Z",
+  "updated_at": "2026-03-20T10:23:00.462051Z"
+}

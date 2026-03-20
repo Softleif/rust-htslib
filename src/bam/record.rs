@@ -1100,16 +1100,30 @@ impl Record {
             return Err(Error::AuxStringError);
         }
         let raw = self.raw_aux_data();
-        match aux_tag_search(raw, tag) {
-            Some(offset) => {
-                // SAFETY: offset is within raw_aux_data; we own the record mutably;
-                // bam_aux_del modifies data in place.
-                let ptr = unsafe { raw.as_ptr().add(offset) as *mut u8 };
-                unsafe { htslib::bam_aux_del(self.inner_ptr_mut(), ptr) };
-                Ok(())
+        let type_offset = aux_tag_search(raw, tag).ok_or(Error::AuxTagNotFound)?;
+        let type_byte = raw[type_offset];
+        let payload_size =
+            aux_payload_size(type_byte, &raw[type_offset + 1..]).ok_or(Error::AuxParsingError)?;
+        // Total field: 2 (tag) + 1 (type) + payload
+        let field_size = 2 + 1 + payload_size;
+        let tag_start = type_offset - 2; // offset of the first tag byte in raw_aux_data
+                                         // Compute the absolute offset of the tag within the bam1_t.data buffer
+        let aux_start_in_data = self.qname_capacity()
+            + self.cigar_len() * std::mem::size_of::<u32>()
+            + self.seq_len().div_ceil(2)
+            + self.seq_len();
+        let abs_start = aux_start_in_data + tag_start;
+        // SAFETY: we own the record mutably; abs_start and field_size are within l_data.
+        unsafe {
+            let data = self.inner.data;
+            let l_data = self.inner.l_data as usize;
+            let src = abs_start + field_size;
+            if src < l_data {
+                std::ptr::copy(data.add(src), data.add(abs_start), l_data - src);
             }
-            None => Err(Error::AuxTagNotFound),
+            self.inner.l_data -= field_size as i32;
         }
+        Ok(())
     }
 
     /// Access the base modifications associated with this Record through the MM tag.
@@ -1618,6 +1632,33 @@ where
     }
 }
 
+/// Compute the payload size in bytes for a BAM aux field given its type byte
+/// and the data starting after the type byte. Returns `None` on malformed data.
+fn aux_payload_size(type_byte: u8, data: &[u8]) -> Option<usize> {
+    match type_byte {
+        b'A' | b'c' | b'C' => Some(1),
+        b's' | b'S' => Some(2),
+        b'i' | b'I' | b'f' => Some(4),
+        b'd' => Some(8),
+        b'Z' | b'H' => memchr::memchr(0, data).map(|p| p + 1),
+        b'B' => {
+            if data.len() < 5 {
+                return None;
+            }
+            let sub_type = data[0];
+            let count = u32::from_le_bytes([data[1], data[2], data[3], data[4]]) as usize;
+            let elem_size = match sub_type {
+                b'c' | b'C' => 1,
+                b's' | b'S' => 2,
+                b'i' | b'I' | b'f' => 4,
+                _ => return None,
+            };
+            Some(5 + count * elem_size)
+        }
+        _ => None,
+    }
+}
+
 /// Pure Rust replacement for `htslib::bam_aux_get`.
 ///
 /// Performs a linear scan through the packed BAM auxiliary data looking for a
@@ -1633,45 +1674,15 @@ fn aux_tag_search(aux_data: &[u8], tag: &[u8]) -> Option<usize> {
     let tag0 = tag[0];
     let tag1 = tag[1];
     let mut pos = 0;
-    let len = aux_data.len();
 
-    while pos + 3 <= len {
+    while pos + 3 <= aux_data.len() {
         if aux_data[pos] == tag0 && aux_data[pos + 1] == tag1 {
             return Some(pos + 2);
         }
 
         let type_byte = aux_data[pos + 2];
         pos += 3;
-        match type_byte {
-            b'A' | b'c' | b'C' => pos += 1,
-            b's' | b'S' => pos += 2,
-            b'i' | b'I' | b'f' => pos += 4,
-            b'd' => pos += 8,
-            b'Z' | b'H' => match memchr::memchr(0, &aux_data[pos..]) {
-                Some(nul_offset) => pos += nul_offset + 1,
-                None => return None,
-            },
-            b'B' => {
-                if pos + 5 > len {
-                    return None;
-                }
-                let sub_type = aux_data[pos];
-                let count = u32::from_le_bytes([
-                    aux_data[pos + 1],
-                    aux_data[pos + 2],
-                    aux_data[pos + 3],
-                    aux_data[pos + 4],
-                ]) as usize;
-                let elem_size = match sub_type {
-                    b'c' | b'C' => 1,
-                    b's' | b'S' => 2,
-                    b'i' | b'I' | b'f' => 4,
-                    _ => return None,
-                };
-                pos += 5 + count * elem_size;
-            }
-            _ => return None,
-        }
+        pos += aux_payload_size(type_byte, &aux_data[pos..])?;
     }
     None
 }

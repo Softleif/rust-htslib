@@ -8,7 +8,6 @@
 use crate::bam;
 use crate::bam::record::cigar_op;
 use crate::bam::record::Cigar;
-use crate::htslib;
 use std::collections::HashMap;
 
 pub struct IterAlignedBlockPairs<'a> {
@@ -411,8 +410,16 @@ impl BamRecordExtensions for bam::Record {
     /// Calculate the rightmost absolute reference base position of an alignment on the reference genome.
     /// Returns the coordinate of the first base after the alignment (0-based).
     fn reference_end(&self) -> i64 {
-        // SAFETY: self.inner_ptr() points to a valid bam1_t owned by the Record.
-        unsafe { htslib::bam_endpos(self.inner_ptr()) }
+        let rlen = if self.is_unmapped() {
+            0i64
+        } else {
+            self.raw_cigar()
+                .iter()
+                .filter(|&&raw| cigar_op::consumes_ref(cigar_op::op(raw)))
+                .map(|&raw| cigar_op::len(raw) as i64)
+                .sum()
+        };
+        self.pos() + if rlen == 0 { 1 } else { rlen }
     }
 
     fn seq_len_from_cigar(&self, include_hard_clip: bool) -> usize {
@@ -9632,6 +9639,41 @@ mod tests {
                 &read.seq_len_from_cigar(true),
                 supposed_length_with_hard_clip
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod bam_endpos_tests {
+    use super::*;
+    use crate::bam::{self, Read};
+    use crate::htslib;
+
+    #[test]
+    fn reference_end_matches_c_on_real_bam() {
+        let mut reader = bam::Reader::from_path("test/test.bam").expect("Error opening BAM");
+        for result in reader.records() {
+            let record = result.unwrap();
+            let c_endpos = unsafe { htslib::bam_endpos(record.inner_ptr()) };
+            let rs_endpos = record.reference_end();
+            assert_eq!(
+                c_endpos,
+                rs_endpos,
+                "endpos mismatch at pos={} tid={}",
+                record.pos(),
+                record.tid()
+            );
+        }
+    }
+
+    #[test]
+    fn reference_end_matches_c_on_cram_sam() {
+        let mut reader = bam::Reader::from_path("test/test_cram.sam").expect("Error opening SAM");
+        for result in reader.records() {
+            let record = result.unwrap();
+            let c_endpos = unsafe { htslib::bam_endpos(record.inner_ptr()) };
+            let rs_endpos = record.reference_end();
+            assert_eq!(c_endpos, rs_endpos);
         }
     }
 }

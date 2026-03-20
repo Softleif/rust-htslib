@@ -1,0 +1,10 @@
+{
+  "uuid": "4366ca68-3fd7-49ad-be80-4f87aeb406d6",
+  "display_id": 57,
+  "title": "Plan pure Rust tabix iteration using bgzf crate instead of hts_itr_query callback",
+  "status": "open",
+  "priority": "low",
+  "created_by": "anon-df5e95db",
+  "created_at": "2026-03-20T13:22:27.332387Z",
+  "updated_at": "2026-03-20T13:22:27.332387Z"
+}

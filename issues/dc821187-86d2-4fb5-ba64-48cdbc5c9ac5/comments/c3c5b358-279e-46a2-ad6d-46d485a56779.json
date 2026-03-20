@@ -1,0 +1,8 @@
+{
+  "uuid": "c3c5b358-279e-46a2-ad6d-46d485a56779",
+  "issue_uuid": "dc821187-86d2-4fb5-ba64-48cdbc5c9ac5",
+  "author": "anon-df5e95db",
+  "content": "Unlocked by CL-6 + CL-26. 60-line C function: translates a BCF record from one header's ID space to another's. Calls bcf_unpack then remaps all tag IDs (INFO keys, FORMAT keys, filter IDs, contig ID) using bcf_hdr_id2int on the target header. Our HeaderView caches make the lookups O(1).",
+  "created_at": "2026-03-20T13:16:19.689568Z",
+  "kind": "plan"
+}

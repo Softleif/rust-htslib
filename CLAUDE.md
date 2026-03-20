@@ -61,18 +61,53 @@ Each module wraps a distinct HTSlib file format with a consistent Reader/Writer 
 
 Default: `bzip2`, `lzma`, `curl`. Optional: `s3`, `gcs`, `libdeflate`, `bindgen`, `static`, `serde_feature`.
 
-## FFI-to-Rust Replacement: Red-Green Testing
+## FFI-to-Rust Replacement: Differential Proptest Strategy
 
-When replacing C (hts-sys) FFI calls with pure Rust implementations, always follow
-red-green testing:
+When replacing C (hts-sys) FFI calls with pure Rust implementations, use
+**differential property-based testing** to prove equivalence:
 
-1. **Write a failing test first** that exercises the FFI function being replaced,
-   covering edge cases and the exact behavior of the C implementation.
-2. **Replace the FFI call** with pure Rust code.
-3. **Verify the test passes** — the Rust implementation must match C behavior exactly.
-4. Run the full test suite (`cargo test`) to catch regressions.
+1. **Write the Rust function as a stub** that initially delegates to the C FFI call
+   (with a `// TODO: replace with pure Rust` comment). This establishes the function
+   signature and call sites.
+2. **Write proptests that compare both implementations**: generate random inputs, call
+   both the C function (via FFI) and the Rust function, and assert identical results.
+   The C implementation is the oracle — the Rust function must match it exactly on all
+   generated inputs.
+3. **Replace the stub body** with the real pure Rust implementation.
+4. **Run the proptests** — they now verify the Rust code against C on hundreds of
+   random inputs, catching edge cases that hand-written tests would miss.
+5. Run the full test suite (`cargo test -- --test-threads 1`) to catch regressions.
 
-This ensures behavioral equivalence between C and Rust implementations and prevents
-silent correctness bugs during incremental replacement.
+### Why this approach
+
+- The C bindings remain available throughout the transition, so we can always call
+  both implementations side-by-side.
+- Proptests explore the input space far more thoroughly than hand-written examples.
+- The C implementation serves as a living oracle — no need to manually reverse-engineer
+  edge-case behavior.
+- When the proptest passes, we have high confidence the replacement is correct.
+
+### Example structure
+
+```rust
+/// Pure Rust replacement for htslib::some_function.
+/// Initially delegates to C; replace body with Rust implementation.
+fn some_function_rs(args) -> Result {
+    // TODO: replace with pure Rust
+    unsafe { htslib::some_function(args) }
+}
+
+#[cfg(test)]
+mod proptest_some_function {
+    proptest! {
+        #[test]
+        fn matches_c_implementation(input in arbitrary_input_strategy()) {
+            let c_result = unsafe { htslib::some_function(input) };
+            let rs_result = some_function_rs(input);
+            prop_assert_eq!(c_result, rs_result);
+        }
+    }
+}
+```
 
 See `.claude/notes/ffi-tree.md` for the full FFI dependency tree and replacement plan.

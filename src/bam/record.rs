@@ -3684,6 +3684,281 @@ mod tests {
 }
 
 #[cfg(test)]
+mod aux_tag_search_tests {
+    use super::*;
+    use proptest::prelude::*;
+    use std::os::raw::c_char;
+
+    /// Helper: build a Record with a given sequence (and matching dummy quals).
+    fn make_record(seq: &[u8]) -> Record {
+        let mut rec = Record::new();
+        let cigar = CigarString::from(vec![Cigar::Match(seq.len() as u32)]);
+        let qual: Vec<u8> = vec![30u8; seq.len()];
+        rec.set(b"read1", Some(&cigar), seq, &qual);
+        rec
+    }
+
+    /// Call the C `bam_aux_get` on a record and parse the result via `parse_aux_field`,
+    /// returning the same `Result<Aux>` that `Record::aux()` returns.
+    /// This is the **oracle** implementation — whatever C returns is correct.
+    fn aux_get_c<'a>(rec: &'a Record, tag: &[u8]) -> Result<Aux<'a>> {
+        let aux = unsafe {
+            htslib::bam_aux_get(
+                &rec.inner as *const htslib::bam1_t,
+                tag.as_ptr() as *const c_char,
+            )
+        };
+        unsafe { parse_aux_field(aux).map(|(aux_field, _length)| aux_field) }
+    }
+
+    /// All valid 2-byte tag characters for BAM aux fields.
+    /// Tags are [A-Za-z][A-Za-z0-9] per the SAM spec.
+    fn tag_strategy() -> impl Strategy<Value = [u8; 2]> {
+        let first = prop::sample::select((b'A'..=b'Z').chain(b'a'..=b'z').collect::<Vec<u8>>());
+        let second = prop::sample::select(
+            (b'A'..=b'Z')
+                .chain(b'a'..=b'z')
+                .chain(b'0'..=b'9')
+                .collect::<Vec<u8>>(),
+        );
+        (first, second).prop_map(|(a, b)| [a, b])
+    }
+
+    /// Strategy to generate an arbitrary scalar Aux value.
+    fn scalar_aux_strategy() -> impl Strategy<Value = Aux<'static>> {
+        prop_oneof![
+            any::<u8>().prop_map(Aux::Char),
+            any::<i8>().prop_map(Aux::I8),
+            any::<u8>().prop_map(Aux::U8),
+            any::<i16>().prop_map(Aux::I16),
+            any::<u16>().prop_map(Aux::U16),
+            any::<i32>().prop_map(Aux::I32),
+            any::<u32>().prop_map(Aux::U32),
+            any::<f32>()
+                .prop_filter("must be finite", |f| f.is_finite())
+                .prop_map(Aux::Float),
+            any::<f64>()
+                .prop_filter("must be finite", |f| f.is_finite())
+                .prop_map(Aux::Double),
+        ]
+    }
+
+    /// Strategy to generate a list of (unique tag, scalar aux value) pairs.
+    /// Tags are deduplicated because BAM records cannot have duplicate tags.
+    fn aux_fields_strategy() -> impl Strategy<Value = Vec<([u8; 2], Aux<'static>)>> {
+        proptest::collection::vec((tag_strategy(), scalar_aux_strategy()), 0..=8).prop_map(
+            |fields| {
+                let mut seen = std::collections::HashSet::new();
+                fields
+                    .into_iter()
+                    .filter(|(tag, _)| seen.insert(*tag))
+                    .collect()
+            },
+        )
+    }
+
+    /// Copy a scalar Aux value. Panics on borrowed variants (String/Array).
+    fn copy_scalar_aux(aux: &Aux<'_>) -> Aux<'static> {
+        match *aux {
+            Aux::Char(v) => Aux::Char(v),
+            Aux::I8(v) => Aux::I8(v),
+            Aux::U8(v) => Aux::U8(v),
+            Aux::I16(v) => Aux::I16(v),
+            Aux::U16(v) => Aux::U16(v),
+            Aux::I32(v) => Aux::I32(v),
+            Aux::U32(v) => Aux::U32(v),
+            Aux::Float(v) => Aux::Float(v),
+            Aux::Double(v) => Aux::Double(v),
+            _ => panic!("copy_scalar_aux called on non-scalar Aux"),
+        }
+    }
+
+    /// Build a record with the given scalar aux fields pushed.
+    fn build_record_with_aux(fields: &[([u8; 2], Aux<'static>)]) -> Record {
+        let mut rec = make_record(b"ACGT");
+        for (tag, val) in fields {
+            rec.push_aux(tag, copy_scalar_aux(val)).unwrap();
+        }
+        rec
+    }
+
+    // ---- Differential proptests: Rust aux_tag_search vs C bam_aux_get ----
+
+    proptest! {
+        /// For every tag present in the record, the Rust implementation must
+        /// return the same parsed Aux value as the C implementation.
+        #[test]
+        fn aux_tag_search_matches_c_for_present_tags(
+            fields in aux_fields_strategy(),
+        ) {
+            let rec = build_record_with_aux(&fields);
+            for (tag, _expected) in &fields {
+                let c_result = aux_get_c(&rec, tag);
+                let rs_result = rec.aux(tag);
+                prop_assert_eq!(
+                    c_result, rs_result,
+                    "Mismatch for tag {:?}", std::str::from_utf8(tag)
+                );
+            }
+        }
+
+        /// For random tags NOT in the record, both implementations must return
+        /// the same error (AuxTagNotFound).
+        #[test]
+        fn aux_tag_search_matches_c_for_absent_tags(
+            fields in aux_fields_strategy(),
+            query_tag in tag_strategy(),
+        ) {
+            let rec = build_record_with_aux(&fields);
+            let tag_present = fields.iter().any(|(t, _)| *t == query_tag);
+            if !tag_present {
+                let c_result = aux_get_c(&rec, &query_tag);
+                let rs_result = rec.aux(&query_tag);
+                prop_assert_eq!(
+                    c_result, rs_result,
+                    "Mismatch for absent tag {:?}", std::str::from_utf8(&query_tag)
+                );
+            }
+        }
+
+        /// The Rust implementation must agree with C on records with no aux data.
+        #[test]
+        fn aux_tag_search_matches_c_on_empty_aux(
+            query_tag in tag_strategy(),
+        ) {
+            let rec = make_record(b"ACGT");
+            let c_result = aux_get_c(&rec, &query_tag);
+            let rs_result = rec.aux(&query_tag);
+            prop_assert_eq!(c_result, rs_result);
+        }
+
+        /// For records with multiple fields, the Rust implementation must find
+        /// each field in the correct position (first, middle, last).
+        #[test]
+        fn aux_tag_search_matches_c_positional(
+            fields in aux_fields_strategy().prop_filter(
+                "need at least 3 fields",
+                |f| f.len() >= 3
+            ),
+        ) {
+            let rec = build_record_with_aux(&fields);
+
+            // Check first, last, and a middle tag
+            let first_tag = &fields[0].0;
+            let last_tag = &fields[fields.len() - 1].0;
+            let mid_tag = &fields[fields.len() / 2].0;
+
+            for tag in [first_tag, mid_tag, last_tag] {
+                let c_result = aux_get_c(&rec, tag);
+                let rs_result = rec.aux(tag);
+                prop_assert_eq!(
+                    c_result, rs_result,
+                    "Positional mismatch for tag {:?}", std::str::from_utf8(tag)
+                );
+            }
+        }
+    }
+
+    // ---- Deterministic tests for string and array types ----
+    // (These can't easily be generated with proptest due to lifetime constraints
+    //  on Aux::String and Aux::Array* — so we test them deterministically.)
+
+    #[test]
+    fn aux_tag_search_matches_c_for_string_fields() {
+        let mut rec = make_record(b"ACGT");
+        rec.push_aux(b"XI", Aux::I32(42)).unwrap();
+        rec.push_aux(b"XS", Aux::String("hello world")).unwrap();
+        rec.push_aux(b"XF", Aux::Float(1.5)).unwrap();
+
+        // String tag: both impls must agree
+        assert_eq!(aux_get_c(&rec, b"XS"), rec.aux(b"XS"));
+        // Tags after the string: both impls must agree
+        assert_eq!(aux_get_c(&rec, b"XF"), rec.aux(b"XF"));
+        // Tag before the string: both impls must agree
+        assert_eq!(aux_get_c(&rec, b"XI"), rec.aux(b"XI"));
+        // Absent tag
+        assert_eq!(aux_get_c(&rec, b"ZZ"), rec.aux(b"ZZ"));
+    }
+
+    #[test]
+    fn aux_tag_search_matches_c_for_array_fields() {
+        let mut rec = make_record(b"ACGT");
+        let arr_i32: Vec<i32> = vec![1, 2, 3, 4, 5];
+        let arr_f32: Vec<f32> = vec![1.0, 2.0, 3.0];
+        rec.push_aux(b"XI", Aux::I32(42)).unwrap();
+        rec.push_aux(b"XE", Aux::ArrayI32((&arr_i32).into()))
+            .unwrap();
+        rec.push_aux(b"XG", Aux::ArrayFloat((&arr_f32).into()))
+            .unwrap();
+        rec.push_aux(b"XS", Aux::String("after_array")).unwrap();
+
+        for tag in [b"XI", b"XE", b"XG", b"XS"] {
+            assert_eq!(
+                aux_get_c(&rec, tag.as_slice()),
+                rec.aux(tag.as_slice()),
+                "Mismatch for tag {:?}",
+                std::str::from_utf8(tag.as_slice())
+            );
+        }
+        assert_eq!(aux_get_c(&rec, b"ZZ"), rec.aux(b"ZZ"));
+    }
+
+    #[test]
+    fn aux_tag_search_matches_c_for_all_array_subtypes() {
+        let mut rec = make_record(b"ACGT");
+        let arr_i8: Vec<i8> = vec![-1, 0, 1];
+        let arr_u8: Vec<u8> = vec![0, 128, 255];
+        let arr_i16: Vec<i16> = vec![-1000, 0, 1000];
+        let arr_u16: Vec<u16> = vec![0, 30000, 65535];
+        let arr_i32: Vec<i32> = vec![-100000, 0, 100000];
+        let arr_u32: Vec<u32> = vec![0, 2000000000, 4000000000];
+        let arr_f32: Vec<f32> = vec![-1.5, 0.0, 1.5];
+        rec.push_aux(b"Xa", Aux::ArrayI8((&arr_i8).into())).unwrap();
+        rec.push_aux(b"Xb", Aux::ArrayU8((&arr_u8).into())).unwrap();
+        rec.push_aux(b"Xc", Aux::ArrayI16((&arr_i16).into()))
+            .unwrap();
+        rec.push_aux(b"Xd", Aux::ArrayU16((&arr_u16).into()))
+            .unwrap();
+        rec.push_aux(b"Xe", Aux::ArrayI32((&arr_i32).into()))
+            .unwrap();
+        rec.push_aux(b"Xf", Aux::ArrayU32((&arr_u32).into()))
+            .unwrap();
+        rec.push_aux(b"Xg", Aux::ArrayFloat((&arr_f32).into()))
+            .unwrap();
+        // A scalar after all arrays — tests correct size skipping
+        rec.push_aux(b"ZZ", Aux::I32(99)).unwrap();
+
+        for tag in [b"Xa", b"Xb", b"Xc", b"Xd", b"Xe", b"Xf", b"Xg", b"ZZ"] {
+            assert_eq!(
+                aux_get_c(&rec, tag.as_slice()),
+                rec.aux(tag.as_slice()),
+                "Mismatch for tag {:?}",
+                std::str::from_utf8(tag.as_slice())
+            );
+        }
+    }
+
+    #[test]
+    fn aux_tag_search_matches_c_after_remove() {
+        let mut rec = make_record(b"ACGT");
+        rec.push_aux(b"XI", Aux::I32(42)).unwrap();
+        rec.push_aux(b"XS", Aux::String("hello")).unwrap();
+        rec.push_aux(b"XF", Aux::Float(1.5)).unwrap();
+
+        rec.remove_aux(b"XS").unwrap();
+
+        for tag in [b"XI", b"XS", b"XF"] {
+            assert_eq!(
+                aux_get_c(&rec, tag.as_slice()),
+                rec.aux(tag.as_slice()),
+                "Mismatch for tag {:?} after remove",
+                std::str::from_utf8(tag.as_slice())
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod alignment_cigar_tests {
     use super::*;
     use crate::bam::{Read, Reader};

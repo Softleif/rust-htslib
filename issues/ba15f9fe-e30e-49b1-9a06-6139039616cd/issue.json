@@ -1,0 +1,10 @@
+{
+  "uuid": "ba15f9fe-e30e-49b1-9a06-6139039616cd",
+  "display_id": 31,
+  "title": "Refactor HashMap<Vec<u8>, _> caches to use string interning or single-buffer storage",
+  "status": "open",
+  "priority": "low",
+  "created_by": "anon-df5e95db",
+  "created_at": "2026-03-20T12:19:25.170566Z",
+  "updated_at": "2026-03-20T12:19:25.170566Z"
+}

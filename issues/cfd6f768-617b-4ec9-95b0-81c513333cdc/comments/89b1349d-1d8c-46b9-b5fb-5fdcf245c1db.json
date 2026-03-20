@@ -1,0 +1,8 @@
+{
+  "uuid": "89b1349d-1d8c-46b9-b5fb-5fdcf245c1db",
+  "issue_uuid": "cfd6f768-617b-4ec9-95b0-81c513333cdc",
+  "author": "anon-df5e95db",
+  "content": "Depends on: bcf_unpack (done), bcf_update_info (CL-50), bcf_update_format (CL-51), bcf_hdr_id2int (done). 220-line C function — the most complex BCF manipulation function. Rewrites every INFO and FORMAT field to remove references to deleted alleles, updates genotype indices, and rebuilds the shared/indiv binary blocks. Should be one of the last BCF functions replaced.",
+  "created_at": "2026-03-20T13:16:58.374650Z",
+  "kind": "plan"
+}

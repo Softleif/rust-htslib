@@ -1,0 +1,11 @@
+{
+  "uuid": "b3d7e54c-bf97-4888-8cae-b0dc4cd2f1b4",
+  "display_id": 8,
+  "title": "Replace trivial BCF record lifecycle leaves (bcf_init, bcf_destroy, bcf_clear) with pure Rust",
+  "description": "Replace 3 trivial BCF record FFI functions: bcf_init (6 lines, struct allocation), bcf_destroy (5 lines, deallocation), bcf_clear (30 lines, field reset). All are leaves. Complexity: trivial-easy. Unlocks bcf_dup and bcf_copy.",
+  "status": "open",
+  "priority": "medium",
+  "created_by": "driver--implement-issue-1-95f4",
+  "created_at": "2026-03-20T08:37:45.461607Z",
+  "updated_at": "2026-03-20T08:37:45.461607Z"
+}

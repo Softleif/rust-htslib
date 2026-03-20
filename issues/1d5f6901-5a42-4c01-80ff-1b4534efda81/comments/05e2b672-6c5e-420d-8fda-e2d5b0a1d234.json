@@ -1,0 +1,8 @@
+{
+  "uuid": "05e2b672-6c5e-420d-8fda-e2d5b0a1d234",
+  "issue_uuid": "1d5f6901-5a42-4c01-80ff-1b4534efda81",
+  "author": "anon-df5e95db",
+  "content": "Decision: Store three HashMap<Vec<u8>, i32> caches (one per BCF_DT_*) inside HeaderView. Built once at construction from the hdr->id[] arrays. All 4 callers (name2rid, tag_type, name_to_id, sample_to_id) will use the cache instead of FFI. O(1) lookup, no khash dependency, fully safe Rust.",
+  "created_at": "2026-03-20T11:00:03.906366Z",
+  "kind": "decision"
+}

@@ -1,0 +1,8 @@
+{
+  "uuid": "af5587e7-5341-4545-91f5-b6598effc5f8",
+  "issue_uuid": "1d5f6901-5a42-4c01-80ff-1b4534efda81",
+  "author": "anon-df5e95db",
+  "content": "Plan: Write differential proptests comparing C bcf_hdr_id2int against a Rust replacement for all 3 dictionary types (BCF_DT_ID, BCF_DT_CTG, BCF_DT_SAMPLE). Strategy: build headers with random contigs/filters/INFO/FORMAT/samples via proptest, then query every known name plus random absent names and assert C == Rust. Implementation will use a pre-built HashMap<Vec<u8>, i32> cache inside HeaderView for O(1) lookups, initialized from the hdr->id[] arrays at construction time.",
+  "created_at": "2026-03-20T10:58:02.287022Z",
+  "kind": "plan"
+}

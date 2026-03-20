@@ -3,11 +3,12 @@
   "display_id": 6,
   "title": "Replace bcf_unpack with pure Rust binary BCF decoder",
   "description": "Replace bcf_unpack FFI call (~68 lines) with pure Rust. This is the highest-value leaf: it unlocks 10+ BCF record modification functions (bcf_update_id, bcf_add_id, bcf_update_filter, bcf_add_filter, bcf_remove_filter, bcf_update_alleles, bcf_update_info, bcf_update_format, bcf_translate, vcf_format). The function unpacks variable-length encoded binary BCF fields. Complexity: medium-high (binary format parsing). Used throughout src/bcf/record.rs.",
-  "status": "open",
+  "status": "closed",
   "priority": "high",
   "created_by": "driver--implement-issue-1-95f4",
   "created_at": "2026-03-20T08:37:33.067465Z",
-  "updated_at": "2026-03-20T08:37:34.839769Z",
+  "updated_at": "2026-03-20T10:18:29.205926Z",
+  "closed_at": "2026-03-20T10:18:29.205926Z",
   "labels": [
     "rust-replacement"
   ]

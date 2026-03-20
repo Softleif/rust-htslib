@@ -233,12 +233,8 @@ impl Reader {
                 c_path.to_string_lossy().as_ref(),
             )));
         }
-        // SAFETY: hts_file is non-null (checked above); hts_get_format returns
-        // a pointer to htslib's internal format struct; reading .format is safe.
-        let hts_format: u32 = unsafe {
-            let file_format: *const hts_sys::htsFormat = htslib::hts_get_format(hts_file);
-            (*file_format).format
-        };
+        // SAFETY: hts_file is non-null (checked above); htsFile.format is a public field.
+        let hts_format: u32 = unsafe { (*hts_file).format.format };
 
         // SAFETY: c_path is a valid CString; result is null-checked.
         let tbx = unsafe { htslib::tbx_index_load(c_path.as_ptr()) };
@@ -390,7 +386,7 @@ impl Read for Reader {
                     // itr from Some, buf is &mut, tbx from constructor). Return checked.
                     let ret = unsafe {
                         htslib::hts_itr_next(
-                            htslib::hts_get_bgzfp(self.hts_file),
+                            (*self.hts_file).fp.bgzf,
                             itr,
                             &mut self.buf as *mut htslib::kstring_t as *mut libc::c_void,
                             self.tbx as *mut libc::c_void,
@@ -622,5 +618,26 @@ mod tbx_accessor_tests {
         for (i, name) in reader.seqnames().iter().enumerate() {
             assert_eq!(reader.tid(name).unwrap(), i as u64);
         }
+    }
+
+    #[test]
+    fn hts_get_format_matches_direct_access() {
+        let reader =
+            Reader::from_path("test/tabix_reader/test_bed3.bed.gz").expect("Error opening file.");
+        let c_format = unsafe {
+            let fmt_ptr = htslib::hts_get_format(reader.hts_file);
+            (*fmt_ptr).format
+        };
+        let rs_format = unsafe { (*reader.hts_file).format.format };
+        assert_eq!(c_format, rs_format);
+    }
+
+    #[test]
+    fn hts_get_bgzfp_matches_direct_access() {
+        let reader =
+            Reader::from_path("test/tabix_reader/test_bed3.bed.gz").expect("Error opening file.");
+        let c_bgzf = unsafe { htslib::hts_get_bgzfp(reader.hts_file) };
+        let rs_bgzf = unsafe { (*reader.hts_file).fp.bgzf };
+        assert_eq!(c_bgzf, rs_bgzf);
     }
 }

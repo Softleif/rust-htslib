@@ -3485,7 +3485,8 @@ CCCCCCCCCCCCCCCCCCC"[..],
             let name = header.tid2name(tid).unwrap();
             // Compare Rust cache lookup against C FFI
             let c_str = ffi::CString::new(name).unwrap();
-            let c_tid = unsafe { htslib::sam_hdr_name2tid(header.inner_ptr() as *mut _, c_str.as_ptr()) };
+            let c_tid =
+                unsafe { htslib::sam_hdr_name2tid(header.inner_ptr() as *mut _, c_str.as_ptr()) };
             assert_eq!(
                 header.tid(name),
                 Some(c_tid as u32),
@@ -3500,7 +3501,8 @@ CCCCCCCCCCCCCCCCCCC"[..],
         let bam = Reader::from_path("test/test.bam").expect("Error opening file.");
         let header = bam.header();
         for tid in 0..header.target_count() {
-            let c_ptr = unsafe { htslib::sam_hdr_tid2name(header.inner_ptr() as *mut _, tid as i32) };
+            let c_ptr =
+                unsafe { htslib::sam_hdr_tid2name(header.inner_ptr() as *mut _, tid as i32) };
             assert!(!c_ptr.is_null());
             let c_name = unsafe { ffi::CStr::from_ptr(c_ptr).to_bytes() };
             let rs_name = header.tid2name(tid).unwrap();

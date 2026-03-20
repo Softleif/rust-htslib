@@ -2,11 +2,12 @@
   "uuid": "cab65cf2-5f45-44a1-abf9-d0ca50e7c127",
   "display_id": 40,
   "title": "Replace bam_aux_update_array with pure Rust buffer manipulation",
-  "status": "open",
+  "status": "closed",
   "priority": "high",
   "created_by": "anon-df5e95db",
   "created_at": "2026-03-20T13:13:58.384888Z",
-  "updated_at": "2026-03-20T13:14:00.081670Z",
+  "updated_at": "2026-03-20T14:25:30.576975Z",
+  "closed_at": "2026-03-20T14:25:30.576975Z",
   "labels": [
     "enhancement"
   ]

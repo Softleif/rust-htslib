@@ -1,0 +1,8 @@
+{
+  "uuid": "b9a80945-2f5f-41b6-bc5a-cd736e45b3e3",
+  "issue_uuid": "e4799c6d-adea-4c1b-826f-27e70b848049",
+  "author": "anon-df5e95db",
+  "content": "Multiple caches (BAM HeaderView tid_by_name, BCF HeaderView id_cache, tbx Reader tid_by_name/cached_seqnames, faidx Reader) use String or Vec<u8> as HashMap keys and cached values. These are heap-allocated, never mutated after construction, and frequently passed to C FFI (needing NUL termination). Investigate replacing with a compact inline string type that: (1) avoids heap allocation for short strings (SSO), (2) guarantees NUL termination for zero-cost CStr conversion, (3) is readonly after construction. Candidates: compact_str, smol_str, or a custom CString8-backed type. Related to CL-31 (HashMap key efficiency).",
+  "created_at": "2026-03-20T12:34:49.355783Z",
+  "kind": "plan"
+}

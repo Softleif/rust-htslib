@@ -1,0 +1,8 @@
+{
+  "uuid": "2777e624-0084-4f22-b5ec-754e8e179268",
+  "issue_uuid": "62e607f8-9852-4fab-b964-906c4ace80df",
+  "author": "anon-df5e95db",
+  "content": "Used in Record's Clone impl (line 68). The C function (9 lines) deep-copies a bam1_t: copies the fixed-size core struct, then reallocs the target's data buffer and memcpys l_data bytes. In Rust: copy the bam1_t core fields, allocate a new data buffer via libc::realloc (or malloc), copy the data bytes. Must handle the m_data (capacity) vs l_data (length) distinction. No other FFI dependencies.",
+  "created_at": "2026-03-20T14:36:01.458005Z",
+  "kind": "plan"
+}

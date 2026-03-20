@@ -3,11 +3,12 @@
   "display_id": 15,
   "title": "Replace BGZF leaf functions (bgzf_is_bgzf, bgzf_seek) and plan full BGZF Rust module",
   "description": "Replace 2 BGZF FFI leaf functions: bgzf_is_bgzf (11 lines, magic header check) and bgzf_seek (16 lines, position management). These are the first steps toward a full BGZF Rust replacement which would unlock faidx, tbx, hts_open/close, and all file I/O. Consider using the flate2 crate or referencing the noodles crate's BGZF implementation. Complexity: easy.",
-  "status": "open",
+  "status": "closed",
   "priority": "medium",
   "created_by": "driver--implement-issue-1-95f4",
   "created_at": "2026-03-20T08:38:10.914989Z",
-  "updated_at": "2026-03-20T08:38:12.621854Z",
+  "updated_at": "2026-03-20T12:31:11.210412Z",
+  "closed_at": "2026-03-20T12:31:11.210412Z",
   "labels": [
     "rust-replacement"
   ]

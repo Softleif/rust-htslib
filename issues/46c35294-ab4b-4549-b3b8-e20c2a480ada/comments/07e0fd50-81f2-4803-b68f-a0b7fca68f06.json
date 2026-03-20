@@ -1,0 +1,8 @@
+{
+  "uuid": "07e0fd50-81f2-4803-b68f-a0b7fca68f06",
+  "issue_uuid": "46c35294-ab4b-4549-b3b8-e20c2a480ada",
+  "author": "driver--implement-issue-1-95f4",
+  "content": "Committed: document hts-sys FFI call tree for incremental Rust replacement [CL-2] | Files: 2 files changed, 566 insertions(+)",
+  "created_at": "2026-03-20T08:39:30.753901Z",
+  "kind": "result"
+}

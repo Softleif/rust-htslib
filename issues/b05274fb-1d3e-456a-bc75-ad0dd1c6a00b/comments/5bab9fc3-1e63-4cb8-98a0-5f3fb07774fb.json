@@ -1,0 +1,8 @@
+{
+  "uuid": "5bab9fc3-1e63-4cb8-98a0-5f3fb07774fb",
+  "issue_uuid": "b05274fb-1d3e-456a-bc75-ad0dd1c6a00b",
+  "author": "anon-df5e95db",
+  "content": "hts_itr_next (60 lines): advances the iterator by seeking to the next virtual offset (bgzf_seek) and reading one record (sam_read1). The iterator state tracks current bin/chunk. Depends on: pure Rust BGZF (#65), sam_read1 (#68), and region query (#71).",
+  "created_at": "2026-03-20T14:37:56.169918Z",
+  "kind": "plan"
+}

@@ -1,0 +1,8 @@
+{
+  "uuid": "cabe83ab-e3ab-4c2c-ac69-d4e25c506970",
+  "issue_uuid": "d8f8e6ff-0794-4bbf-bffc-a432b25278d2",
+  "author": "anon-df5e95db",
+  "content": "Unlocked by CL-26 (bcf_hdr_id2int replacement). Trivial 7-line C function: calls bcf_hdr_id2int to get tag ID, then scans the unpacked d.fmt array for a matching entry. With our Rust HeaderView.dict_lookup this becomes a HashMap get + linear scan of the fmt array. No C memory management needed.",
+  "created_at": "2026-03-20T13:14:22.461447Z",
+  "kind": "plan"
+}

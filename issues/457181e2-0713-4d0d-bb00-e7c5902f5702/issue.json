@@ -1,0 +1,10 @@
+{
+  "uuid": "457181e2-0713-4d0d-bb00-e7c5902f5702",
+  "display_id": 76,
+  "title": "Build noodles-vs-htslib differential test suite for BAM I/O validation",
+  "status": "open",
+  "priority": "high",
+  "created_by": "anon-df5e95db",
+  "created_at": "2026-03-20T14:59:33.784421Z",
+  "updated_at": "2026-03-20T14:59:33.784421Z"
+}

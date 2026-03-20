@@ -1,0 +1,8 @@
+{
+  "uuid": "020c0283-c8c6-4589-98c8-f86e35afe37b",
+  "issue_uuid": "03365057-d5ae-47d6-944c-decdff6c3fc0",
+  "author": "anon-df5e95db",
+  "content": "Architectural decision: the entire BAM I/O stack depends on BGZF compression. Options: (1) bgzf crate — lightweight, focused on BGZF blocks, (2) noodles-bgzf — part of the noodles ecosystem, well-tested, (3) roll our own with flate2. This evaluation should benchmark read/write throughput vs htslib's BGZF and decide which crate to adopt. Blocks all BAM I/O replacements.",
+  "created_at": "2026-03-20T14:36:45.644692Z",
+  "kind": "plan"
+}

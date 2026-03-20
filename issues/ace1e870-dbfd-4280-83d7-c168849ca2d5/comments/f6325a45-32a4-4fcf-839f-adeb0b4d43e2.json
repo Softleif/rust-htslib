@@ -1,0 +1,8 @@
+{
+  "uuid": "f6325a45-32a4-4fcf-839f-adeb0b4d43e2",
+  "issue_uuid": "ace1e870-dbfd-4280-83d7-c168849ca2d5",
+  "author": "anon-df5e95db",
+  "content": "Decision: Write the Rust replacement as a function that parses the BCF binary format and writes decoded values into the C bcf_dec_t struct (using unsafe), since downstream C functions (bcf_update_*, vcf_format, etc.) still read from that struct. This means the Rust code does the parsing/decoding, but still uses C-compatible memory management (libc realloc for kstring_t/hts_expand patterns). The parsing helpers (bcf_dec_size, bcf_dec_int1, bcf_fmt_sized_array) will be pure safe Rust operating on byte slices. Differential testing: create BCF records with random ID, alleles, filters, INFO fields, copy the record, unpack one with C and one with Rust, compare the decoded d struct fields.",
+  "created_at": "2026-03-20T09:27:19.997319Z",
+  "kind": "decision"
+}

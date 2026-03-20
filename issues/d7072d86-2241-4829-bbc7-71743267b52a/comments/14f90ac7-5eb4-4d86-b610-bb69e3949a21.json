@@ -1,0 +1,8 @@
+{
+  "uuid": "14f90ac7-5eb4-4d86-b610-bb69e3949a21",
+  "issue_uuid": "d7072d86-2241-4829-bbc7-71743267b52a",
+  "author": "anon-df5e95db",
+  "content": "sam_read1 (50 lines): format-dispatched — reads one record from BAM (binary), SAM (text), or CRAM. For BAM: reads block_size (4 bytes LE), then block_size bytes of binary record data into bam1_t. For SAM: calls sam_parse1 (#64). For CRAM: delegates to cram_get_bam_seq (not replaceable). Depends on: pure Rust BGZF (#65) for BAM, sam_parse1 (#64) for SAM.",
+  "created_at": "2026-03-20T14:37:03.760750Z",
+  "kind": "plan"
+}

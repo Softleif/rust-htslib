@@ -1,0 +1,8 @@
+{
+  "uuid": "6beba4be-1db6-4e8a-bbd4-f8835ee9c6b1",
+  "issue_uuid": "ff5cb7b5-efff-4f6f-b578-d49b53a2f70f",
+  "author": "anon-df5e95db",
+  "content": "Unlocked by CL-26. Same pattern as bcf_get_info_values but reads from d.fmt instead of d.info. Per-sample data layout. The Rust Format struct already manages the buffer.",
+  "created_at": "2026-03-20T13:14:33.011786Z",
+  "kind": "plan"
+}

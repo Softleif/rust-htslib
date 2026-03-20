@@ -1,0 +1,8 @@
+{
+  "uuid": "9a7ab300-db32-43e4-bf40-24c0ac954127",
+  "issue_uuid": "843b280e-3d27-4154-90b4-321c03ba080b",
+  "author": "anon-df5e95db",
+  "content": "Unlocked by CL-7 (bam_aux_get replacement). The C function (65 lines) finds the existing tag via bam_aux_get, computes the minimal integer encoding (i8/i16/i32), resizes the data buffer if the new encoding differs in size, and writes the value. Our aux_tag_search + aux_payload_size already handle the find+size logic. Needs: buffer resize (realloc of bam1_t.data via possibly_expand_bam_data pattern) + little-endian write.",
+  "created_at": "2026-03-20T13:13:46.656490Z",
+  "kind": "plan"
+}

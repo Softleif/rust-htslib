@@ -1,0 +1,8 @@
+{
+  "uuid": "8f16c285-a454-47c5-bc6a-2409ae1f06ca",
+  "issue_uuid": "ba15f9fe-e30e-49b1-9a06-6139039616cd",
+  "author": "anon-df5e95db",
+  "content": "Both BCF HeaderView (id_cache) and BAM HeaderView (planned tid_cache) use HashMap<Vec<u8>, i32/u32> where each key is a separate heap allocation. For headers with thousands of entries (e.g., GRCh38 contigs), this creates many small allocations. Consider: (1) single contiguous Vec<u8> buffer with NUL-separated names + HashMap<Range<usize>, id> referencing offsets, (2) string interning crate, or (3) sorted Vec with binary search for small dictionaries.",
+  "created_at": "2026-03-20T12:19:28.754986Z",
+  "kind": "plan"
+}

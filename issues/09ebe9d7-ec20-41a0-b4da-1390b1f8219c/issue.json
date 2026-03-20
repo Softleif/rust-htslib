@@ -2,11 +2,12 @@
   "uuid": "09ebe9d7-ec20-41a0-b4da-1390b1f8219c",
   "display_id": 35,
   "title": "Replace hts_get_format and hts_get_bgzfp with direct struct field access",
-  "status": "open",
+  "status": "closed",
   "priority": "low",
   "created_by": "anon-df5e95db",
   "created_at": "2026-03-20T13:01:16.835006Z",
-  "updated_at": "2026-03-20T13:01:18.658930Z",
+  "updated_at": "2026-03-20T13:05:43.576951Z",
+  "closed_at": "2026-03-20T13:05:43.576951Z",
   "labels": [
     "enhancement"
   ]

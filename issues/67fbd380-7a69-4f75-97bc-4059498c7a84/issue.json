@@ -3,11 +3,12 @@
   "display_id": 9,
   "title": "Replace trivial BAM record leaves (bam_copy1, bam_endpos, bam_aux_append, bam_aux_del) with pure Rust",
   "description": "Replace 4 simple BAM record FFI functions: bam_copy1 (9 lines, memcpy), bam_endpos (6 lines, CIGAR arithmetic), bam_aux_append (30 lines, buffer append), bam_aux_del (5 lines, tag deletion). All are leaves with no hts-sys dependencies. Used in src/bam/record.rs and src/bam/ext.rs. Complexity: trivial-easy.",
-  "status": "open",
+  "status": "closed",
   "priority": "medium",
   "created_by": "driver--implement-issue-1-95f4",
   "created_at": "2026-03-20T08:37:49.093336Z",
-  "updated_at": "2026-03-20T08:37:50.731677Z",
+  "updated_at": "2026-03-20T12:15:26.824035Z",
+  "closed_at": "2026-03-20T12:15:26.824035Z",
   "labels": [
     "rust-replacement"
   ]

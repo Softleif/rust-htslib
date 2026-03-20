@@ -1,0 +1,11 @@
+{
+  "uuid": "a6280fd6-ae6a-4d67-a938-8321876d2154",
+  "display_id": 16,
+  "title": "Replace hts_itr_query with pure Rust bin-based index query",
+  "description": "Replace hts_itr_query FFI call (~150 lines) with pure Rust. This is a leaf function (no cross-deps to our used set) but has high algorithmic complexity: bin-based lookup with BAI/CSI/TBI format handling and linear interpolation. Used via sam_itr_queryi and sam_itr_querys in src/bam/mod.rs. Complexity: hard.",
+  "status": "open",
+  "priority": "low",
+  "created_by": "driver--implement-issue-1-95f4",
+  "created_at": "2026-03-20T08:38:14.396997Z",
+  "updated_at": "2026-03-20T08:38:14.396997Z"
+}

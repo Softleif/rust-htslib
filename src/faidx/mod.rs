@@ -7,6 +7,7 @@
 //! Module for working with faidx-indexed FASTA files.
 //!
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use cstr8::CString8;
@@ -39,6 +40,10 @@ pub enum FaidxError {
 #[derive(Debug)]
 pub struct Reader {
     inner: *mut htslib::faidx_t,
+    /// Cached sequence names, indexed by sequence ID.
+    cached_names: Vec<String>,
+    /// Cached sequence lengths, keyed by sequence name.
+    cached_lengths: HashMap<String, u64>,
 }
 
 /// Convert a path to a C string suitable for htslib, with precise errors.
@@ -74,6 +79,36 @@ pub fn build<P: AsRef<Path>>(path: P) -> Result<(), FaidxError> {
 }
 
 impl Reader {
+    /// Build the sequence name and length caches from the C faidx handle.
+    ///
+    /// Called once at construction. After this, `n_seqs()`, `seq_name()`, and
+    /// `fetch_seq_len()` are served from pure Rust data structures.
+    ///
+    /// # Safety
+    /// `inner` must be a valid, non-null pointer to an initialized `faidx_t`.
+    unsafe fn build_caches(inner: *mut htslib::faidx_t) -> (Vec<String>, HashMap<String, u64>) {
+        let n = htslib::faidx_nseq(inner).max(0) as usize;
+        let mut names = Vec::with_capacity(n);
+        let mut lengths = HashMap::with_capacity(n);
+        for i in 0..n {
+            let ptr = htslib::faidx_iseq(inner, i as i32);
+            if ptr.is_null() {
+                continue;
+            }
+            let name = match std::ffi::CStr::from_ptr(ptr).to_str() {
+                Ok(s) => s.to_owned(),
+                Err(_) => continue,
+            };
+            let cname = CString8::new(name.as_str()).unwrap();
+            let len = htslib::faidx_seq_len64(inner, cname.as_ptr().cast());
+            if len >= 0 {
+                lengths.insert(name.clone(), len as u64);
+            }
+            names.push(name);
+        }
+        (names, lengths)
+    }
+
     /// Create a new Reader from a path.
     pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Self, FaidxError> {
         let path = path.as_ref();
@@ -81,12 +116,16 @@ impl Reader {
         // SAFETY: cpath is a valid null-terminated CString; result is null-checked.
         let inner = unsafe { htslib::fai_load(cpath.as_ptr().cast()) };
         if inner.is_null() {
-            // path_to_cstr8 succeeded, so to_string_lossy is lossless here
             return Err(FaidxError::Open {
                 path: path.to_string_lossy().into_owned(),
             });
         }
-        Ok(Self { inner })
+        let (cached_names, cached_lengths) = unsafe { Self::build_caches(inner) };
+        Ok(Self {
+            inner,
+            cached_names,
+            cached_lengths,
+        })
     }
 
     /// Create a new Reader from a URL.
@@ -102,7 +141,12 @@ impl Reader {
                 path: url_str.to_owned(),
             });
         }
-        Ok(Self { inner })
+        let (cached_names, cached_lengths) = unsafe { Self::build_caches(inner) };
+        Ok(Self {
+            inner,
+            cached_names,
+            cached_lengths,
+        })
     }
 
     /// Fetch the sequence as a byte array.
@@ -165,43 +209,25 @@ impl Reader {
 
     /// Fetches the number of sequences in the fai index.
     pub fn n_seqs(&self) -> u64 {
-        // SAFETY: self.inner is valid (from constructor null-check).
-        let n = unsafe { htslib::faidx_nseq(self.inner) };
-        n.max(0) as u64
+        self.cached_names.len() as u64
     }
 
     /// Fetches the i-th sequence name.
     pub fn seq_name(&self, i: i32) -> Result<String, FaidxError> {
-        // faidx_iseq does no bounds checking (it indexes directly into an
-        // array), so we must validate the index before calling it.
-        if i < 0 || (i as u64) >= self.n_seqs() {
+        if i < 0 {
             return Err(FaidxError::InvalidSequenceName { index: i });
         }
-        // SAFETY: index bounds-checked above; self.inner is valid. Result null-checked.
-        let ptr = unsafe { htslib::faidx_iseq(self.inner, i) };
-        if ptr.is_null() {
-            return Err(FaidxError::InvalidSequenceName { index: i });
-        }
-        // SAFETY: ptr is non-null (checked above); htslib guarantees a valid C string.
-        let cname = unsafe { std::ffi::CStr::from_ptr(ptr) };
-        cname
-            .to_str()
-            .map(|s| s.to_owned())
-            .map_err(|_| FaidxError::InvalidSequenceName { index: i })
+        self.cached_names
+            .get(i as usize)
+            .cloned()
+            .ok_or(FaidxError::InvalidSequenceName { index: i })
     }
 
     /// Fetches the length of the given sequence name.
     ///
     /// Returns `None` if the sequence is not found in the index.
     pub fn fetch_seq_len<N: AsRef<str>>(&self, name: N) -> Option<u64> {
-        let cname = CString8::new(name.as_ref()).ok()?;
-        // SAFETY: self.inner is valid; cname is a valid CString; return checked.
-        let seq_len = unsafe { htslib::faidx_seq_len64(self.inner, cname.as_ptr().cast()) };
-        if seq_len < 0 {
-            None
-        } else {
-            Some(seq_len as u64)
-        }
+        self.cached_lengths.get(name.as_ref()).copied()
     }
 
     /// Returns all sequence names.
@@ -469,5 +495,77 @@ mod tests {
             let seq = r.fetch_seq("chr1", 0, 119).unwrap();
             assert_eq!(seq.len(), 120);
         }
+    }
+}
+
+#[cfg(test)]
+mod faidx_cache_tests {
+    use super::*;
+
+    fn open_reader() -> Reader {
+        Reader::from_path("test/test_cram.fa").expect("Error opening faidx")
+    }
+
+    /// Compare cached n_seqs against C faidx_nseq.
+    #[test]
+    fn n_seqs_matches_c() {
+        let r = open_reader();
+        let c_result = unsafe { htslib::faidx_nseq(r.inner) }.max(0) as u64;
+        assert_eq!(r.n_seqs(), c_result);
+    }
+
+    /// Compare every cached seq_name against C faidx_iseq.
+    #[test]
+    fn seq_name_matches_c_for_all_indices() {
+        let r = open_reader();
+        let n = unsafe { htslib::faidx_nseq(r.inner) }.max(0);
+        for i in 0..n {
+            let c_ptr = unsafe { htslib::faidx_iseq(r.inner, i) };
+            assert!(!c_ptr.is_null());
+            let c_name = unsafe { std::ffi::CStr::from_ptr(c_ptr) }
+                .to_str()
+                .unwrap()
+                .to_owned();
+            let rs_name = r.seq_name(i).unwrap();
+            assert_eq!(c_name, rs_name, "seq_name mismatch at index {i}");
+        }
+    }
+
+    /// Compare cached fetch_seq_len against C faidx_seq_len64 for all sequences.
+    #[test]
+    fn fetch_seq_len_matches_c_for_all_sequences() {
+        let r = open_reader();
+        let n = r.n_seqs();
+        for i in 0..n {
+            let name = r.seq_name(i as i32).unwrap();
+            let cname = CString8::new(name.as_str()).unwrap();
+            let c_len = unsafe { htslib::faidx_seq_len64(r.inner, cname.as_ptr().cast()) };
+            let rs_len = r.fetch_seq_len(&name);
+            if c_len < 0 {
+                assert_eq!(rs_len, None, "expected None for {name}");
+            } else {
+                assert_eq!(rs_len, Some(c_len as u64), "length mismatch for {name}");
+            }
+        }
+    }
+
+    /// Absent sequences must return None (matching C returning -1).
+    #[test]
+    fn fetch_seq_len_absent_matches_c() {
+        let r = open_reader();
+        let cname = CString8::new("nonexistent_chr").unwrap();
+        let c_len = unsafe { htslib::faidx_seq_len64(r.inner, cname.as_ptr().cast()) };
+        assert_eq!(c_len, -1);
+        assert_eq!(r.fetch_seq_len("nonexistent_chr"), None);
+    }
+
+    /// Out-of-bounds seq_name must return error (matching C behavior).
+    #[test]
+    fn seq_name_out_of_bounds() {
+        let r = open_reader();
+        let n = r.n_seqs();
+        assert!(r.seq_name(n as i32).is_err());
+        assert!(r.seq_name(-1).is_err());
+        assert!(r.seq_name(i32::MAX).is_err());
     }
 }

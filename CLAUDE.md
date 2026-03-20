@@ -110,6 +110,23 @@ mod proptest_some_function {
 }
 ```
 
+### Implementation quality bar
+
+When writing the Rust replacement, aim for **best-in-class idiomatic Rust**, not a
+line-by-line C transliteration:
+
+- **No raw pointer arithmetic** in the public API — use slices, `Option`, `Result`.
+- **Bounds-checked access** everywhere — use `.get()` not indexing, return errors on
+  corrupt data instead of panicking.
+- **Extract helpers** for repeated patterns — don't duplicate logic.
+- **Use appropriate data structures** — if C uses a hash table, use `HashMap`; if C
+  does linear search, consider whether a cache would be better.
+- **Abort-safe memory management** — if using C allocators (`libc::realloc`), check
+  for null and abort rather than producing UB.
+- **Named constants** over magic numbers — define `const` for any literal that has
+  semantic meaning.
+- **Decompose large functions** into focused helpers with clear safety docs.
+
 See `.claude/notes/ffi-tree.md` for the full FFI dependency tree and replacement plan.
 
 ## Git Workflow

@@ -32,6 +32,7 @@
 //! let (fmt_type, fmt_length) = header.format_type(b"GT").unwrap();
 //! ```
 
+use std::collections::HashMap;
 use std::ffi;
 use std::os::raw::c_char;
 use std::slice;
@@ -288,9 +289,15 @@ pub enum HeaderRecord {
     Generic { key: String, value: String },
 }
 
+/// Number of dictionary types in BCF headers (BCF_DT_ID, BCF_DT_CTG, BCF_DT_SAMPLE).
+const BCF_DICT_COUNT: usize = 3;
+
 #[derive(Debug)]
 pub struct HeaderView {
     pub(crate) inner: *mut htslib::bcf_hdr_t,
+    /// Pre-built name→id caches for O(1) lookups, one per BCF_DT_* dictionary.
+    /// Replaces the opaque C khash tables that are inaccessible from Rust.
+    id_cache: [HashMap<Vec<u8>, i32>; BCF_DICT_COUNT],
 }
 
 // SAFETY: HeaderView owns its inner pointer exclusively; no shared mutable state.
@@ -298,13 +305,47 @@ unsafe impl Send for HeaderView {}
 // SAFETY: HeaderView owns its inner pointer exclusively; no shared mutable state.
 unsafe impl Sync for HeaderView {}
 
+/// Build the name→id HashMap caches from the C header's `id[]` arrays.
+///
+/// # Safety
+/// `inner` must be a valid, non-null pointer to an initialized `bcf_hdr_t`.
+unsafe fn build_id_caches(
+    inner: *const htslib::bcf_hdr_t,
+) -> [HashMap<Vec<u8>, i32>; BCF_DICT_COUNT] {
+    let hdr = &*inner;
+    std::array::from_fn(|which| {
+        let n = hdr.n[which] as usize;
+        if n == 0 || hdr.id[which].is_null() {
+            return HashMap::new();
+        }
+        let entries = slice::from_raw_parts(hdr.id[which], n);
+        let mut map = HashMap::with_capacity(n);
+        for entry in entries {
+            if entry.key.is_null() {
+                continue;
+            }
+            let key = ffi::CStr::from_ptr(entry.key).to_bytes().to_vec();
+            let id = (*entry.val).id;
+            map.insert(key, id);
+        }
+        map
+    })
+}
+
 impl HeaderView {
     /// Create a view from a raw pointer to a header.
     ///
     /// # Safety
     /// The caller must ensure that the header is initialized.
     pub unsafe fn from_ptr(inner: *mut htslib::bcf_hdr_t) -> Self {
-        HeaderView { inner }
+        let id_cache = build_id_caches(inner);
+        HeaderView { inner, id_cache }
+    }
+
+    /// Look up a name in one of the three BCF dictionaries.
+    /// Returns the numeric ID, or `None` if the name is not found.
+    fn dict_lookup(&self, which: usize, name: &[u8]) -> Option<i32> {
+        self.id_cache[which].get(name).copied()
     }
 
     /// Get a pointer to the underlying raw header.
@@ -383,19 +424,11 @@ impl HeaderView {
     /// # Errors
     /// If `name` does not match a chromosome currently in the VCF header, returns [`BcfError::UnknownContig`]
     pub fn name2rid(&self, name: &[u8]) -> Result<u32> {
-        let c_str = ffi::CString::new(name).unwrap();
-        // SAFETY: self.inner is non-null (from constructor); c_str is a valid CString.
-        unsafe {
-            match htslib::bcf_hdr_id2int(
-                self.inner,
-                htslib::BCF_DT_CTG as i32,
-                c_str.as_ptr() as *mut c_char,
-            ) {
-                -1 => Err(Error::UnknownContig {
-                    contig: str::from_utf8(name).unwrap().to_owned(),
-                }),
-                i => Ok(i as u32),
-            }
+        match self.dict_lookup(htslib::BCF_DT_CTG as usize, name) {
+            Some(id) => Ok(id as u32),
+            None => Err(Error::UnknownContig {
+                contig: str::from_utf8(name).unwrap().to_owned(),
+            }),
         }
     }
 
@@ -409,17 +442,13 @@ impl HeaderView {
 
     fn tag_type(&self, tag: &[u8], hdr_type: ::libc::c_uint) -> Result<(TagType, TagLength)> {
         let tag_desc = || str::from_utf8(tag).unwrap().to_owned();
-        let c_str_tag = ffi::CString::new(tag).unwrap();
-        // SAFETY: self.inner is non-null; id is bounds-checked; entry/val pointers are valid htslib internals.
+        let id = self
+            .dict_lookup(htslib::BCF_DT_ID as usize, tag)
+            .ok_or_else(|| Error::UndefinedTag { tag: tag_desc() })?;
+
+        // SAFETY: id is a valid index (from the header's own dictionary);
+        // entry/val pointers are valid htslib internals.
         let (_type, length, num_values) = unsafe {
-            let id = htslib::bcf_hdr_id2int(
-                self.inner,
-                htslib::BCF_DT_ID as i32,
-                c_str_tag.as_ptr() as *mut c_char,
-            );
-            if id < 0 {
-                return Err(Error::UndefinedTag { tag: tag_desc() });
-            }
             let n = (*self.inner).n[htslib::BCF_DT_ID as usize] as usize;
             let entry = slice::from_raw_parts((*self.inner).id[htslib::BCF_DT_ID as usize], n);
             let d = (*entry[id as usize].val).info[hdr_type as usize];
@@ -433,7 +462,6 @@ impl HeaderView {
             _ => return Err(Error::UnexpectedType { tag: tag_desc() }),
         };
         let length = match length as ::libc::c_uint {
-            // XXX: Hacky "as u32" cast. Trace back through unsafe{} towards BCF struct and rollback to proper type
             htslib::BCF_VL_FIXED => TagLength::Fixed(num_values as u32),
             htslib::BCF_VL_VAR => TagLength::Variable,
             htslib::BCF_VL_A => TagLength::AltAlleles,
@@ -447,16 +475,9 @@ impl HeaderView {
 
     /// Convert string ID (e.g., for a `FILTER` value) to its numeric identifier.
     pub fn name_to_id(&self, id: &CStr8) -> Result<Id> {
-        // SAFETY: self.inner is non-null (from constructor); id is a valid NUL-terminated CStr8.
-        unsafe {
-            match htslib::bcf_hdr_id2int(
-                self.inner,
-                htslib::BCF_DT_ID as i32,
-                id.as_ptr() as *const c_char,
-            ) {
-                -1 => Err(Error::UnknownID { id: id.into() }),
-                i => Ok(Id(i as u32)),
-            }
+        match self.dict_lookup(htslib::BCF_DT_ID as usize, id.as_bytes()) {
+            Some(i) => Ok(Id(i as u32)),
+            None => Err(Error::UnknownID { id: id.into() }),
         }
     }
 
@@ -482,19 +503,11 @@ impl HeaderView {
 
     /// Convert string sample name to its numeric identifier.
     pub fn sample_to_id(&self, id: &[u8]) -> Result<Id> {
-        let c_str = ffi::CString::new(id).unwrap();
-        // SAFETY: self.inner is non-null (from constructor); c_str is a valid CString.
-        unsafe {
-            match htslib::bcf_hdr_id2int(
-                self.inner,
-                htslib::BCF_DT_SAMPLE as i32,
-                c_str.as_ptr() as *const c_char,
-            ) {
-                -1 => Err(Error::UnknownSample {
-                    name: str::from_utf8(id).unwrap().to_owned(),
-                }),
-                i => Ok(Id(i as u32)),
-            }
+        match self.dict_lookup(htslib::BCF_DT_SAMPLE as usize, id) {
+            Some(i) => Ok(Id(i as u32)),
+            None => Err(Error::UnknownSample {
+                name: str::from_utf8(id).unwrap().to_owned(),
+            }),
         }
     }
 
@@ -588,10 +601,11 @@ impl HeaderView {
 
 impl Clone for HeaderView {
     fn clone(&self) -> Self {
-        HeaderView {
-            // SAFETY: self.inner is non-null (from constructor); bcf_hdr_dup returns a new copy.
-            inner: unsafe { htslib::bcf_hdr_dup(self.inner) },
-        }
+        // SAFETY: self.inner is non-null (from constructor); bcf_hdr_dup returns a new copy.
+        let inner = unsafe { htslib::bcf_hdr_dup(self.inner) };
+        // Rebuild caches from the new (duplicated) header pointer.
+        let id_cache = unsafe { build_id_caches(inner) };
+        HeaderView { inner, id_cache }
     }
 }
 
@@ -730,5 +744,208 @@ mod tests {
         let vcf = Reader::from_path("test/test_string.vcf").expect("Error opening file");
         let header = vcf.header();
         assert!(header.id_to_sample(Id(header.sample_count())).is_err());
+    }
+}
+
+#[cfg(test)]
+mod bcf_hdr_id2int_tests {
+    use super::*;
+    use crate::bcf::{Format, Read, Reader, Writer};
+    use proptest::prelude::*;
+    use std::ffi;
+    use std::os::raw::c_char;
+    use tempfile::NamedTempFile;
+
+    /// Call C bcf_hdr_id2int as the oracle.
+    fn id2int_c(hdr: &HeaderView, which: i32, name: &[u8]) -> i32 {
+        let c_str = ffi::CString::new(name).unwrap();
+        unsafe { htslib::bcf_hdr_id2int(hdr.inner, which, c_str.as_ptr() as *mut c_char) }
+    }
+
+    /// Strategy for valid BCF tag/contig/sample names: alphanumeric + underscore, 1-20 chars.
+    fn name_strategy() -> impl Strategy<Value = String> {
+        "[A-Za-z][A-Za-z0-9_]{0,19}"
+    }
+
+    /// Strategy for a set of unique names (1-8 entries).
+    fn names_strategy() -> impl Strategy<Value = Vec<String>> {
+        proptest::collection::hash_set(name_strategy(), 1..=8).prop_map(|s| s.into_iter().collect())
+    }
+
+    /// Build a header with the given contigs, INFO tags, FILTER tags, FORMAT tags, and samples.
+    fn build_header(
+        contigs: &[String],
+        info_tags: &[String],
+        filter_tags: &[String],
+        format_tags: &[String],
+        samples: &[String],
+    ) -> (NamedTempFile, Arc<HeaderView>) {
+        let tmp = NamedTempFile::new().unwrap();
+        let mut header = Header::new();
+        for c in contigs {
+            header.push_record(format!("##contig=<ID={c},length=1000>").as_bytes());
+        }
+        for t in info_tags {
+            header.push_record(
+                format!("##INFO=<ID={t},Number=1,Type=Integer,Description=\"test\">").as_bytes(),
+            );
+        }
+        for t in filter_tags {
+            header.push_record(format!("##FILTER=<ID={t},Description=\"test\">").as_bytes());
+        }
+        for t in format_tags {
+            header.push_record(
+                format!("##FORMAT=<ID={t},Number=1,Type=Integer,Description=\"test\">").as_bytes(),
+            );
+        }
+        for s in samples {
+            header.push_sample(s.as_bytes());
+        }
+        let writer = Writer::from_path(tmp.path(), &header, true, Format::Bcf).unwrap();
+        let hdr = writer.header().clone();
+        (tmp, Arc::new(hdr))
+    }
+
+    // ---- Differential proptests: Rust HeaderView methods vs C bcf_hdr_id2int ----
+
+    proptest! {
+        /// name2rid must match C for all contigs present in the header.
+        #[test]
+        fn name2rid_matches_c_for_present_contigs(
+            contigs in names_strategy(),
+        ) {
+            let (_tmp, hdr) = build_header(&contigs, &[], &[], &[], &[]);
+            for name in &contigs {
+                let c_result = id2int_c(&hdr, htslib::BCF_DT_CTG as i32, name.as_bytes());
+                let rs_result = hdr.name2rid(name.as_bytes());
+                match rs_result {
+                    Ok(id) => prop_assert_eq!(c_result, id as i32, "contig {}", name),
+                    Err(_) => prop_assert_eq!(c_result, -1, "contig {} expected not found", name),
+                }
+            }
+        }
+
+        /// name2rid must match C for absent contigs.
+        #[test]
+        fn name2rid_matches_c_for_absent_contigs(
+            contigs in names_strategy(),
+            query in name_strategy(),
+        ) {
+            let (_tmp, hdr) = build_header(&contigs, &[], &[], &[], &[]);
+            if !contigs.contains(&query) {
+                let c_result = id2int_c(&hdr, htslib::BCF_DT_CTG as i32, query.as_bytes());
+                let rs_result = hdr.name2rid(query.as_bytes());
+                prop_assert_eq!(c_result, -1);
+                prop_assert!(rs_result.is_err());
+            }
+        }
+
+        /// name_to_id (BCF_DT_ID) must match C for INFO/FILTER/FORMAT tags.
+        #[test]
+        fn name_to_id_matches_c_for_present_tags(
+            info_tags in names_strategy(),
+            filter_tags in names_strategy(),
+            format_tags in names_strategy(),
+        ) {
+            let (_tmp, hdr) = build_header(&["chr1".into()], &info_tags, &filter_tags, &format_tags, &[]);
+            // All INFO, FILTER, FORMAT tags should be findable
+            for tags in [&info_tags, &filter_tags, &format_tags] {
+                for name in tags {
+                    let c_result = id2int_c(&hdr, htslib::BCF_DT_ID as i32, name.as_bytes());
+                    let id = cstr8::CString8::new(name.as_str())
+                        .expect("valid CString8");
+                    let rs_result = hdr.name_to_id(&id);
+                    match rs_result {
+                        Ok(id) => prop_assert_eq!(c_result, *id as i32, "tag {}", name),
+                        Err(_) => prop_assert_eq!(c_result, -1, "tag {} expected not found", name),
+                    }
+                }
+            }
+        }
+
+        /// name_to_id must match C for absent tags.
+        #[test]
+        fn name_to_id_matches_c_for_absent_tags(
+            info_tags in names_strategy(),
+            query in name_strategy(),
+        ) {
+            let (_tmp, hdr) = build_header(&["chr1".into()], &info_tags, &[], &[], &[]);
+            if !info_tags.contains(&query) {
+                let c_result = id2int_c(&hdr, htslib::BCF_DT_ID as i32, query.as_bytes());
+                // Only check queries that C also doesn't find (some built-in tags like PASS exist)
+                if c_result == -1 {
+                    let id = cstr8::CString8::new(query.as_str()).expect("valid CString8");
+                    let rs_result = hdr.name_to_id(&id);
+                    prop_assert!(rs_result.is_err());
+                }
+            }
+        }
+
+        /// sample_to_id must match C for all samples present in the header.
+        #[test]
+        fn sample_to_id_matches_c_for_present_samples(
+            samples in names_strategy(),
+        ) {
+            let (_tmp, hdr) = build_header(&["chr1".into()], &[], &[], &[], &samples);
+            for name in &samples {
+                let c_result = id2int_c(&hdr, htslib::BCF_DT_SAMPLE as i32, name.as_bytes());
+                let rs_result = hdr.sample_to_id(name.as_bytes());
+                match rs_result {
+                    Ok(id) => prop_assert_eq!(c_result, *id as i32, "sample {}", name),
+                    Err(_) => prop_assert_eq!(c_result, -1, "sample {} expected not found", name),
+                }
+            }
+        }
+
+        /// sample_to_id must match C for absent samples.
+        #[test]
+        fn sample_to_id_matches_c_for_absent_samples(
+            samples in names_strategy(),
+            query in name_strategy(),
+        ) {
+            let (_tmp, hdr) = build_header(&["chr1".into()], &[], &[], &[], &samples);
+            if !samples.contains(&query) {
+                let c_result = id2int_c(&hdr, htslib::BCF_DT_SAMPLE as i32, query.as_bytes());
+                let rs_result = hdr.sample_to_id(query.as_bytes());
+                prop_assert_eq!(c_result, -1);
+                prop_assert!(rs_result.is_err());
+            }
+        }
+    }
+
+    // ---- Deterministic tests with real VCF files ----
+
+    #[test]
+    fn id2int_matches_c_on_real_vcf() {
+        let vcf = Reader::from_path("test/test_string.vcf").expect("Error opening file");
+        let hdr = vcf.header();
+
+        // Test all contigs
+        for rid in 0..hdr.contig_count() {
+            let name = hdr.rid2name(rid).unwrap();
+            let c_result = id2int_c(hdr, htslib::BCF_DT_CTG as i32, name);
+            assert_eq!(c_result, rid as i32, "contig roundtrip for rid {rid}");
+        }
+
+        // Test all samples
+        for i in 0..hdr.sample_count() {
+            let name = hdr.id_to_sample(Id(i)).unwrap();
+            let c_result = id2int_c(hdr, htslib::BCF_DT_SAMPLE as i32, &name);
+            assert_eq!(c_result, i as i32, "sample roundtrip for {i}");
+        }
+
+        // Test absent names
+        assert_eq!(
+            id2int_c(hdr, htslib::BCF_DT_CTG as i32, b"nonexistent_contig"),
+            -1
+        );
+        assert_eq!(
+            id2int_c(hdr, htslib::BCF_DT_SAMPLE as i32, b"nonexistent_sample"),
+            -1
+        );
+        assert_eq!(
+            id2int_c(hdr, htslib::BCF_DT_ID as i32, b"nonexistent_tag"),
+            -1
+        );
     }
 }

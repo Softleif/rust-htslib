@@ -1,0 +1,8 @@
+{
+  "uuid": "81a6f238-54fd-4917-a6e4-7e2656a54fec",
+  "issue_uuid": "1704fdd7-63d9-41b1-87f0-67d4ec34f15b",
+  "author": "anon-df5e95db",
+  "content": "Plan: Replace kbs_init/kbs_insert/kbs_destroy in remove_alleles() with a pure Rust helper that allocates a C-compatible kbitset_t using libc::malloc, sets bits from the &[bool] slice, and frees after bcf_remove_allele_set returns. No FFI calls for bitset operations. Differential test: create records with multiple alleles, remove various combinations, compare results between C (kbs_*) and Rust implementations.",
+  "created_at": "2026-03-20T11:12:53.855850Z",
+  "kind": "plan"
+}

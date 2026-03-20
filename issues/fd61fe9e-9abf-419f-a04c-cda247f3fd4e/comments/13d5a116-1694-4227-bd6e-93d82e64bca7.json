@@ -1,0 +1,8 @@
+{
+  "uuid": "13d5a116-1694-4227-bd6e-93d82e64bca7",
+  "issue_uuid": "fd61fe9e-9abf-419f-a04c-cda247f3fd4e",
+  "author": "anon-df5e95db",
+  "content": "The pileup engine (bam_plp_init/destroy/reset/auto/set_maxcnt) operates on an opaque bam_plp_s struct. It implements a streaming pileup algorithm: maintains a sorted linked list of active alignments, advances position-by-position, and yields pileup columns. A full Rust reimplementation would need: (1) the alignment overlap tracking data structure, (2) the callback mechanism for reading records (currently uses a C function pointer from sam_read1), (3) the pileup column generation logic. This is a self-contained algorithm — no external FFI deps once sam_read1 (#68) is in Rust. noodles-bam has a pure Rust pileup as reference.",
+  "created_at": "2026-03-20T14:38:37.601008Z",
+  "kind": "plan"
+}

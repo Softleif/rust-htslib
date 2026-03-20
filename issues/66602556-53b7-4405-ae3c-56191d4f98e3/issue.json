@@ -1,0 +1,10 @@
+{
+  "uuid": "66602556-53b7-4405-ae3c-56191d4f98e3",
+  "display_id": 48,
+  "title": "Replace bcf_remove_filter with pure Rust filter removal",
+  "status": "open",
+  "priority": "medium",
+  "created_by": "anon-df5e95db",
+  "created_at": "2026-03-20T13:15:23.515069Z",
+  "updated_at": "2026-03-20T13:15:23.515069Z"
+}

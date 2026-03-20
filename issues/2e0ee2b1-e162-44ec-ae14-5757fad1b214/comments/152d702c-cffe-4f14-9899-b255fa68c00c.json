@@ -1,0 +1,8 @@
+{
+  "uuid": "152d702c-cffe-4f14-9899-b255fa68c00c",
+  "issue_uuid": "2e0ee2b1-e162-44ec-ae14-5757fad1b214",
+  "author": "anon-df5e95db",
+  "content": "Plan: Change bcf_dec_int1 to return Option<(i64, usize)> — None on unknown type. Also addressing review issues #5 (BCF_BT_INT64 constant), #10 (BCF_TYPE_SHIFT table size 16), and #7 (extract char_field_len helper for duplicated NUL scanning). Will also add bounds checks to bcf_dec_int1 (review #2).",
+  "created_at": "2026-03-20T10:27:12.908186Z",
+  "kind": "plan"
+}
